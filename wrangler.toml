@@ -12,7 +12,7 @@ binding = "DB"
 # ⚠️ لسا لازم تحطها إنت: نفّذ أولاً
 #   wrangler d1 create merchant-db
 # وانسخ الاسم والـ id من نتيجة الأمر (أو من `wrangler d1 list`) هنا:
-database_name = "nalsh"
+database_name = "nalsh-db"
 database_id = "65f387d5-1a16-4811-bc14-1b95e91bd88b"
 
 # ========================================================
