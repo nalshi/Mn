@@ -1,35 +1,3 @@
 name = "api"
 main = "src/index.js"
 compatibility_date = "2026-07-19"
-
-# ========================================================
-# قاعدة البيانات D1
-# استبدل database_name و database_id بقيم مشروعك الفعلية
-# ========================================================
-[[d1_databases]]
-binding = "DB"
-database_name = "nalsh-db"
-database_id = "65f387d5-1a16-4811-bc14-1b95e91bd88b"
-
-# ========================================================
-# متغيرات عامة (غير حساسة)
-# ========================================================
-[vars]
-GITHUB_OWNER = "nalshi"
-GITHUB_REPO = "Nynnl"
-
-# قائمة الدومينات المسموحة بالوصول (CORS)
-ALLOWED_ORIGINS = "*"
-
-# إعدادات Firebase العامة (Client Config)
-FCM_API_KEY = "AIzaSyCMXZAyWU6z8BfUbvG74LfVWaB36zs75E4"
-FCM_AUTH_DOMAIN = "shiban-a2757.firebaseapp.com"
-FCM_PROJECT_ID = "shiban-a2757"
-FCM_SENDER_ID = "45283310547"
-FCM_APP_ID = "1:45283310547:web:8470fdc9e635e74bd30d26"
-FCM_VAPID_KEY = "BMLWrq3yDRYQvrwJybVidHXUNP6AcE6O5RNmSR9kSl-wfpfbtKwr6a6vXG2HfFye10xXRPT08iDjrtPbDGemD-c"
-
-FIREBASE_DB_URL = "https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/"
-
-# رابط api.php على Render
-API_PHP_URL = "https://api-4vl2.onrender.com/api.php"
