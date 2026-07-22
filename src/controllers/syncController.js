@@ -71,6 +71,26 @@ export async function syncCustomer({ env, body, request }) {
   return { message: 'تمت مزامنة العميل' };
 }
 
+// ⭐ إضافة: مزامنة عكسية لحالة التذكرة من api.php (بعد موافقة/رفض/إلغاء/تسليم من
+// النظام القديم) إلى D1، حتى لا تبقى التذكرة في D1 بحالتها القديمة (pending) وتُعتبر
+// "تذكرة قائمة" قابلة للدمج مع طلب جديد لاحق لنفس العميل/التاجر — وهو ما كان يُعيد
+// إحياء طلبات مُلغاة/مكتملة بالخطأ في MySQL بعد كل طلب جديد.
+export async function syncTicketStatus({ env, body, request }) {
+  const internalKey = request.headers.get('X-Internal-Key') || '';
+  if (!env.INTERNAL_SYNC_KEY || internalKey !== env.INTERNAL_SYNC_KEY) {
+    throw new HttpError('غير مصرح', 401);
+  }
+  if (!body.ticket_id || !body.status) {
+    throw new HttpError('ticket_id و status مطلوبان', 400);
+  }
+
+  await env.DB.prepare(`UPDATE live_tickets SET status = ? WHERE ticket_id = ?`)
+    .bind(body.status, body.ticket_id)
+    .run();
+
+  return { message: 'تمت مزامنة حالة التذكرة' };
+}
+
 export async function saveFcmToken({ env, user, body }) {
   const fcmToken = body.fcm_token || '';
   if (fcmToken) {

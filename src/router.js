@@ -44,6 +44,8 @@ export const actionRegistry = {
   // ⭐ إضافة (2026-07-21): مزامنة داخلية من api.php - محمية بـ X-Internal-Key
   // وليس JWT، لذلك public:true (نفس نمط sync_user تماماً).
   sync_customer: { handler: syncController.syncCustomer, roles: [], public: true },
+  // ⭐ إضافة: مزامنة عكسية لحالة التذكرة من api.php (نفس نمط sync_customer، محمي بمفتاح داخلي لا JWT)
+  sync_ticket_status: { handler: syncController.syncTicketStatus, roles: [], public: true },
   save_fcm_token: { handler: syncController.saveFcmToken, roles: [] },
   get_firebase_config: { handler: syncController.getFirebaseConfig, roles: [] },
   get_categories_tree: { handler: syncController.getCategoriesTreeHandler, roles: [] },
