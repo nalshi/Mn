@@ -505,7 +505,7 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
     const mUsername = mInfo.username;
 
     const existingTicket = await env.DB.prepare(
-      `SELECT ticket_id, ticket_data, status FROM live_tickets
+      `SELECT ticket_id, ticket_data, status, delivery_code FROM live_tickets
        WHERE customer_id = ? AND merchant_id = ?
        AND status IN ('pending_merchant_approval', 'pending_delivery_acceptance')
        AND delivery_agent_id IS NULL LIMIT 1`
@@ -560,7 +560,7 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
           merchant_id: merchantId,
           customer_id: customerId,
           status: existingTicket.status,
-          delivery_code: existingData.delivery_code || 0,
+          delivery_code: existingTicket.delivery_code || 0,
           ticket_data: updatedTicketDataStr,
         })
       );
