@@ -3,7 +3,6 @@ import { syncCatalogToStorefront } from '../services/catalog/catalogSyncService.
 import { syncOrderTracking } from '../services/realtime/realtimeSyncService.js';
 import { sendFcmNotification } from '../services/notifications/providers/fcmProvider.js';
 import { extractCoordsFromUrl, calculateDistance, calculateDeliveryFee } from '../services/geo/geoUtils.js';
-import { syncNewOrderToLegacyApi } from '../services/legacySync/tidbSyncService.js';
 import {
   ALLOWED_DELIVERY_CENTER_LAT,
   ALLOWED_DELIVERY_CENTER_LNG,
@@ -553,18 +552,6 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
         .run();
       isOrderMerged = true;
 
-      ctx.waitUntil(
-        syncNewOrderToLegacyApi(env, {
-          ticket_id: ticketId,
-          order_group_id: existingData.order_group_id || newOrderGroupId,
-          merchant_id: merchantId,
-          customer_id: customerId,
-          status: existingTicket.status,
-          delivery_code: existingTicket.delivery_code || 0,
-          ticket_data: updatedTicketDataStr,
-        })
-      );
-
       createdTickets.push({
         ticket_id: ticketId,
         merchant_id: merchantId,
@@ -609,18 +596,6 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
       )
         .bind(ticketId, newOrderGroupId, merchantId, customerId, finalStatus, deliveryCode, ticketDataStr)
         .run();
-
-      ctx.waitUntil(
-        syncNewOrderToLegacyApi(env, {
-          ticket_id: ticketId,
-          order_group_id: newOrderGroupId,
-          merchant_id: merchantId,
-          customer_id: customerId,
-          status: finalStatus,
-          delivery_code: deliveryCode,
-          ticket_data: ticketDataStr,
-        })
-      );
 
       createdTickets.push({
         ticket_id: ticketId,

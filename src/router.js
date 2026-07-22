@@ -31,6 +31,12 @@ export const actionRegistry = {
   // 📦 الطلبات (تاجر فقط)
   get_merchant_orders: { handler: orderController.getMerchantOrders, roles: [ROLES.MERCHANT] },
   update_order_status: { handler: orderController.updateOrderStatus, roles: [ROLES.MERCHANT] },
+  // ⭐ إضافة: نقل دورة حياة الطلب كاملة إلى الـ Worker (بدل merchant_approve_order /
+  // merchant_update_order_status / merchant_cancel_order / merchant_confirm_delivery_code
+  // و get_orders بـ api.php).
+  get_orders: { handler: orderController.getOrders, roles: [ROLES.MERCHANT] },
+  cancel_order: { handler: orderController.cancelOrder, roles: [ROLES.MERCHANT] },
+  confirm_delivery_code: { handler: orderController.confirmDeliveryCode, roles: [ROLES.MERCHANT] },
 
   // ⚙️ إعدادات المتجر
   get_merchant_settings: {

@@ -19,6 +19,8 @@ const rules = {
   delete_product: (body) => requireFields(body, ['id']),
   toggle_availability: (body) => requireFields(body, ['id']),
   update_order_status: (body) => requireFields(body, ['ticket_id', 'status']),
+  cancel_order: (body) => requireFields(body, ['ticket_id']),
+  confirm_delivery_code: (body) => requireFields(body, ['ticket_id', 'code']),
   // ⭐ تصحيح (2026-07-21): القاعدة القديمة (['merchant_id','order_data']) كانت
   // تطابق شكل بيانات مختلف تماماً عن الحمولة الفعلية التي يرسلها checkout.js
   // (window.apiRequest('create_order', {customer, idempotency_key, local_cart})).
