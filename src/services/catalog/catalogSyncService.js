@@ -1,4 +1,5 @@
 import { commitMultipleFiles } from '../storage/providers/githubProvider.js';
+import { purgeCloudflareCache, buildStoreFileUrls } from '../storage/providers/cloudflareCacheProvider.js';
 
 // ========================================================
 // ⚡ خدمة مزامنة كتالوج المتجر (منتجات + فئات) إلى GitHub
@@ -128,6 +129,15 @@ export async function syncCatalogToStorefront(env, username, merchantId, product
 
     await commitMultipleFiles(env, files, `⚡ Auto-sync via Worker [${username}]`);
     console.log(`[Catalog Sync Success] ${username}`);
+
+    // 🧹 مسح كاش Cloudflare لروابط هذا التاجر فقط على دومين واجهة المتجر
+    // (الدومين الموجود في Cloudflare) حتى تنعكس التحديثات فوراً بدل انتظار
+    // انتهاء صلاحية الكاش الطبيعية.
+    const cacheUrls = buildStoreFileUrls(
+      env,
+      files.map((f) => f.path)
+    );
+    await purgeCloudflareCache(env, cacheUrls);
   } catch (error) {
     console.error('Catalog Sync Error:', error);
   }

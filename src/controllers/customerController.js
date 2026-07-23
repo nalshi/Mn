@@ -388,10 +388,13 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
       productsById[row.id] = row;
     }
 
-    const orderItemsArray = [];
-    let totalProductsPrice = 0;
-    let currency = 'YER';
-    let merchantItemCount = 0;
+    // ⭐ كل منتج له عملته الخاصة (currency على مستوى المنتج نفسه)، لذلك نجمّع
+    // عناصر هذا التاجر حسب العملة بدل جمعها كلها في إجمالي واحد. هذا يمنع
+    // خلط أسعار منتجات بعملات مختلفة (مثلاً YER و USD بنفس متجر التاجر) داخل
+    // نفس الإجمالي، وكل مجموعة عملة تصبح "طلب فرعي" (تذكرة) مستقلة بحسابها
+    // الخاص لاحقاً.
+    const itemsByCurrency = {};
+    let merchantItemCount = 0; // إجمالي عدد القطع لكل عملات التاجر معاً (لعتبة الشحن المجاني بعدد القطع)
 
     for (const item of items) {
       const productId = item.product_id || item.listing_id || item.id;
@@ -404,7 +407,7 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
         throw new HttpError(`المنتج '${product.name}' غير متاح حالياً للطلب.`, 400);
       }
 
-      currency = product.currency || 'YER';
+      const currency = product.currency || 'YER';
       const qty = parseInt(item.qty) || 0;
       merchantItemCount += qty;
 
@@ -438,9 +441,12 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
       }
 
       const finalSecurePrice = basePrice * (1 - parseFloat(product.discount || 0) / 100);
-      totalProductsPrice += finalSecurePrice * qty;
 
-      orderItemsArray.push({
+      if (!itemsByCurrency[currency]) {
+        itemsByCurrency[currency] = { items: [], totalProductsPrice: 0 };
+      }
+      itemsByCurrency[currency].totalProductsPrice += finalSecurePrice * qty;
+      itemsByCurrency[currency].items.push({
         product_id: product.id,
         listing_id: product.id,
         size_id: itemOptionId,
@@ -456,30 +462,41 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
       });
     }
 
-    overallCartTotal += totalProductsPrice;
+    // الحد الأدنى للسلة (MIN_CART_VALUE) وعتبة الشحن المجاني بالقيمة محسوبة
+    // بعملة YER (عملة رسوم التوصيل الأساسية)، فنستخدم فقط إجمالي منتجات YER
+    // لهذا التاجر لهذا الغرض تحديداً — لا نخلطها بعملات أخرى.
+    const yerSubtotal = itemsByCurrency['YER']?.totalProductsPrice || 0;
+    overallCartTotal += yerSubtotal;
 
     let actualDeliveryFee = feePerOrder;
     if (mSettings.free_shipping_enabled === true || mSettings.free_shipping_enabled === 'true') {
       const fType = mSettings.free_shipping_type || 'always';
       const fThresh = parseFloat(mSettings.free_shipping_threshold || 0);
       if (fType === 'always') actualDeliveryFee = 0;
-      else if (fType === 'order_value' && totalProductsPrice >= fThresh) actualDeliveryFee = 0;
+      else if (fType === 'order_value' && yerSubtotal >= fThresh) actualDeliveryFee = 0;
       else if (fType === 'item_count' && merchantItemCount >= fThresh) actualDeliveryFee = 0;
     }
 
-    const grandTotal = currency === 'YER' ? totalProductsPrice + actualDeliveryFee : totalProductsPrice;
+    // كل عملة تصبح طلب فرعي (تذكرة) مستقل بحسابه الخاص. رسوم التوصيل (وهي
+    // بعملة YER دائماً) تُضاف فقط لمجموعة عملة YER إن وُجدت، وليس لكل عملة
+    // على حدة، حتى لا تُحتسب أكثر من مرة على نفس الطلب.
+    for (const [currency, group] of Object.entries(itemsByCurrency)) {
+      const deliveryFeeForGroup = currency === 'YER' ? actualDeliveryFee : 0;
+      const grandTotal = currency === 'YER' ? group.totalProductsPrice + deliveryFeeForGroup : group.totalProductsPrice;
 
-    preparedSubOrders[merchantId] = {
-      merchantInfo: mInfo,
-      financials: {
-        products_total: totalProductsPrice,
-        delivery_fee: actualDeliveryFee,
-        grand_total: grandTotal,
-        currency,
-        delivery_currency: 'YER',
-      },
-      items: orderItemsArray,
-    };
+      preparedSubOrders[`${merchantId}::${currency}`] = {
+        merchantId,
+        merchantInfo: mInfo,
+        financials: {
+          products_total: group.totalProductsPrice,
+          delivery_fee: deliveryFeeForGroup,
+          grand_total: grandTotal,
+          currency,
+          delivery_currency: 'YER',
+        },
+        items: group.items,
+      };
+    }
   }
 
   if (overallCartTotal < MIN_CART_VALUE) {
@@ -498,19 +515,38 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
     .bind(finalName, finalAddress, customerId)
     .run();
 
-  for (const merchantId of Object.keys(preparedSubOrders)) {
-    const subOrder = preparedSubOrders[merchantId];
+  for (const subKey of Object.keys(preparedSubOrders)) {
+    const subOrder = preparedSubOrders[subKey];
+    const merchantId = subOrder.merchantId;
     const mInfo = subOrder.merchantInfo;
     const mUsername = mInfo.username;
+    const subCurrency = subOrder.financials.currency;
 
-    const existingTicket = await env.DB.prepare(
+    // ⭐ يجب أن نبحث عن تذكرة سابقة بنفس عملة هذا الطلب الفرعي تحديداً، وإلا
+    // قد يُدمَج طلب بعملة USD مع تذكرة سابقة بعملة YER لنفس التاجر فيختلط
+    // الحساب. لذلك نجلب كل التذاكر المعلّقة لهذا التاجر ونفلتر بالعملة.
+    const candidateTickets = await env.DB.prepare(
       `SELECT ticket_id, ticket_data, status, delivery_code FROM live_tickets
        WHERE customer_id = ? AND merchant_id = ?
        AND status IN ('pending_merchant_approval', 'pending_delivery_acceptance')
-       AND delivery_agent_id IS NULL LIMIT 1`
+       AND delivery_agent_id IS NULL`
     )
       .bind(customerId, merchantId)
-      .first();
+      .all();
+
+    let existingTicket = null;
+    for (const cand of candidateTickets.results || []) {
+      let candData = {};
+      try {
+        candData = JSON.parse(cand.ticket_data) || {};
+      } catch (e) {
+        candData = {};
+      }
+      if ((candData.financials?.currency || 'YER') === subCurrency) {
+        existingTicket = cand;
+        break;
+      }
+    }
 
     if (existingTicket) {
       let existingData = {};
@@ -626,6 +662,12 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
 // "Post-Processing" بـ api.php التي تُرسل الرد للعميل قبل هذه الخطوات).
 async function deductStockAndNotify(env, tick) {
   try {
+    // ⭐ نتتبع هل "انتهت الكمية" فعلياً لأي منتج ضمن هذا الطلب (وصلت لصفر)،
+    // لأن الشراء بحد ذاته لا يجب أن يستدعي مزامنة GitHub في كل مرة — فقط
+    // عندما يصبح المنتج (أو الخيار) غير متوفر فعلاً، حتى نقلل عدد الكوميتات
+    // غير الضرورية على المستودع ونمسح الكاش فقط عند الحاجة الحقيقية.
+    let stockDepleted = false;
+
     for (const item of tick.original_items_to_deduct) {
       if (item.qty_type !== 'tracked') continue;
       const pid = item.product_id;
@@ -642,21 +684,30 @@ async function deductStockAndNotify(env, tick) {
         await env.DB.prepare(`UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?`)
           .bind(totalRemainingQty, JSON.stringify(options), Date.now(), pid, tick.merchant_id)
           .run();
+        if (totalRemainingQty <= 0) stockDepleted = true;
       } else {
-        await env.DB.prepare(`UPDATE products SET quantity = quantity - ?, updated_at = ? WHERE id = ? AND merchant_id = ?`)
+        await env.DB.prepare(`UPDATE products SET quantity = MAX(quantity - ?, 0), updated_at = ? WHERE id = ? AND merchant_id = ?`)
           .bind(item.quantity, Date.now(), pid, tick.merchant_id)
           .run();
+
+        const row = await env.DB.prepare(`SELECT quantity FROM products WHERE id = ? AND merchant_id = ?`)
+          .bind(pid, tick.merchant_id)
+          .first();
+        if (row && (parseInt(row.quantity, 10) || 0) <= 0) stockDepleted = true;
       }
     }
 
-    // مزامنة كاش المتجر على GitHub (نفس آلية saveProduct/deleteProduct)
-    try {
-      const remaining = await env.DB.prepare(`SELECT * FROM products WHERE merchant_id = ? AND is_available = 1`)
-        .bind(tick.merchant_id)
-        .all();
-      await syncCatalogToStorefront(env, tick.merchant_username, tick.merchant_id, remaining.results || []);
-    } catch (e) {
-      console.error('Catalog sync after order failed:', e);
+    // 🐙 مزامنة كاش المتجر على GitHub (نفس آلية saveProduct/deleteProduct) —
+    // فقط عندما تنتهي كمية أحد المنتجات، وليس عند كل عملية شراء عادية.
+    if (stockDepleted) {
+      try {
+        const remaining = await env.DB.prepare(`SELECT * FROM products WHERE merchant_id = ? AND is_available = 1`)
+          .bind(tick.merchant_id)
+          .all();
+        await syncCatalogToStorefront(env, tick.merchant_username, tick.merchant_id, remaining.results || []);
+      } catch (e) {
+        console.error('Catalog sync after order failed:', e);
+      }
     }
 
     // إشارة Firebase لتحديث لوحة التاجر لحظياً

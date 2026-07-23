@@ -1,5 +1,6 @@
 import { HttpError } from '../security/rbac.js';
 import { getCategoriesTree } from '../services/categories/categoryService.js';
+import { ROLES } from '../config/constants.js';
 
 // ========================================================
 // 🔄 تحكم المزامنة والمسارات العامة
@@ -48,14 +49,18 @@ export async function syncCustomer({ env, body, request }) {
     throw new HttpError('غير مصرح', 401);
   }
 
+  // ⭐ نحافظ على fcm_token الحالي للعميل بالـ D1 (COALESCE) عند كل مزامنة،
+  // بنفس نمط syncUser تماماً، حتى لا تُفقد الإشعارات إذا لم يرسل api.php
+  // التوكن ضمن هذه المزامنة.
   await env.DB.prepare(
-    `INSERT INTO customers (id, full_name, phone, address, is_active, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO customers (id, full_name, phone, address, is_active, fcm_token, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
      full_name=excluded.full_name,
      phone=COALESCE(excluded.phone, customers.phone),
      address=COALESCE(excluded.address, customers.address),
      is_active=excluded.is_active,
+     fcm_token=COALESCE(excluded.fcm_token, customers.fcm_token),
      updated_at=excluded.updated_at`
   )
     .bind(
@@ -64,6 +69,7 @@ export async function syncCustomer({ env, body, request }) {
       body.phone || null,
       body.address || null,
       body.is_active !== undefined ? body.is_active : 1,
+      body.fcm_token || null,
       Date.now()
     )
     .run();
@@ -91,9 +97,16 @@ export async function syncTicketStatus({ env, body, request }) {
   return { message: 'تمت مزامنة حالة التذكرة' };
 }
 
+// ⭐ العملاء (customers) والتجار/المناديب (users) في جدولين منفصلين، لذلك
+// يجب حفظ توكن FCM بالجدول الصحيح حسب دور المستخدم، وإلا لن تصل أي إشعارات
+// للعملاء لاحقاً رغم نجاح الحفظ ظاهرياً.
 export async function saveFcmToken({ env, user, body }) {
   const fcmToken = body.fcm_token || '';
-  if (fcmToken) {
+  if (!fcmToken) return {};
+
+  if (user.role === ROLES.CUSTOMER) {
+    await env.DB.prepare(`UPDATE customers SET fcm_token = ? WHERE id = ?`).bind(fcmToken, user.user_id).run();
+  } else {
     await env.DB.prepare(`UPDATE users SET fcm_token = ? WHERE id = ?`).bind(fcmToken, user.user_id).run();
   }
   return {};

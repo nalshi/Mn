@@ -25,7 +25,7 @@ GITHUB_REPO = "Nynnl"
 # 🔒 أمان: قائمة الدومينات المسموحة بالوصول (CORS). لو تركتها فاضية،
 # يرجع السلوك القديم (*) بدون قيود.
 # ⚠️ عدّل الدومين تحت ليكون دومين لوحة التاجر الفعلي عندك
-ALLOWED_ORIGINS = "*"
+ALLOWED_ORIGINS = "https://appi.dpdns.org"
 
 # إعدادات Firebase العامة (Client Config) -  للنشر لأنها ليست أسرار
 FCM_API_KEY = "AIzaSyCMXZAyWU6z8BfUbvG74LfVWaB36zs75E4"
@@ -39,7 +39,7 @@ FIREBASE_DB_URL = "https://shiban-a2757-default-rtdb.europe-west1.firebasedataba
 
 # رابط الـ api.php القديم على Render (لمزامنة إعدادات التاجر مع النظام الموروث)
 # ⚠️ حط هنا رابط سيرفس Render الفعلي (مثال: https://your-service.onrender.com/api.php)
-API_PHP_URL = "https://api-4vl2.onrender.com/api.php"
+API_PHP_URL = "https://api.nalsh.dpdns.org/api.php"
 
 # ========================================================
 # 🔐 أسرار حقيقية - لا تضعها هنا إطلاقاً كنص صريح!

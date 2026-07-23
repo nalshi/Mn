@@ -1,5 +1,9 @@
 import { syncOrderTracking } from '../services/realtime/realtimeSyncService.js';
-import { notifyOrderStatusUpdate } from '../services/notifications/notificationService.js';
+import {
+  notifyOrderStatusUpdate,
+  notifyMerchantOrderUpdate,
+  notifyOrderCompleted,
+} from '../services/notifications/notificationService.js';
 import { HttpError } from '../security/rbac.js';
 import { syncCatalogToStorefront } from '../services/catalog/catalogSyncService.js';
 
@@ -106,7 +110,10 @@ export async function updateOrderStatus({ env, ctx, user, body }) {
 
   if (order) {
     ctx.waitUntil(syncOrderTracking(env, body.ticket_id, body.status, user.username));
+    // ⭐ إشعار صحيح للعميل (من جدول customers) وللتاجر (من جدول users) معاً
+    // عند تغيير التاجر لحالة الطلب.
     ctx.waitUntil(notifyOrderStatusUpdate(env, order.customer_id, body.status, body.ticket_id));
+    ctx.waitUntil(notifyMerchantOrderUpdate(env, user.user_id, body.status, body.ticket_id));
   }
 
   return { message: 'تم تحديث حالة الطلب' };
@@ -117,7 +124,7 @@ export async function cancelOrder({ env, ctx, user, body }) {
   if (!body.ticket_id) throw new HttpError('ticket_id مطلوب', 400);
 
   const ticket = await env.DB.prepare(
-    `SELECT ticket_id, ticket_data, status FROM live_tickets WHERE ticket_id = ? AND merchant_id = ?`
+    `SELECT ticket_id, ticket_data, status, customer_id FROM live_tickets WHERE ticket_id = ? AND merchant_id = ?`
   )
     .bind(body.ticket_id, user.user_id)
     .first();
@@ -168,6 +175,8 @@ export async function cancelOrder({ env, ctx, user, body }) {
   await env.DB.prepare(`DELETE FROM live_tickets WHERE ticket_id = ?`).bind(body.ticket_id).run();
 
   ctx.waitUntil(syncOrderTracking(env, body.ticket_id, 'cancelled', user.username));
+  // ⭐ إلغاء الطلب هو أيضاً "تغيير حالة من قبل التاجر"، فيجب أن يصل إشعار للعميل.
+  ctx.waitUntil(notifyOrderStatusUpdate(env, ticket.customer_id, 'cancelled', body.ticket_id));
   if (inventoryChanged) {
     const allProducts = await env.DB.prepare(`SELECT * FROM products WHERE merchant_id = ?`).bind(user.user_id).all();
     ctx.waitUntil(syncCatalogToStorefront(env, user.username, user.user_id, allProducts.results));
@@ -224,6 +233,17 @@ export async function confirmDeliveryCode({ env, ctx, user, body }) {
   await env.DB.prepare(`DELETE FROM live_tickets WHERE ticket_id = ?`).bind(ticketId).run();
 
   ctx.waitUntil(syncOrderTracking(env, ticketId, 'completed', user.username));
+  // ⭐ عند اتمام الطلب فعلياً، يصل إشعار صحيح للعميل (تم التسليم) وللتاجر
+  // (توثيق المبلغ في رصيده) معاً.
+  ctx.waitUntil(
+    notifyOrderCompleted(env, {
+      customerId: ticket.customer_id,
+      merchantId: user.user_id,
+      ticketId,
+      grandTotal,
+      currency,
+    })
+  );
 
   return { message: 'تم تأكيد التسليم بنجاح وتوثيق الأرباح في رصيدك!' };
 }
