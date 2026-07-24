@@ -130,13 +130,17 @@ export async function syncCatalogToStorefront(env, username, merchantId, product
     await commitMultipleFiles(env, files, `⚡ Auto-sync via Worker [${username}]`);
     console.log(`[Catalog Sync Success] ${username}`);
 
-    // 🧹 مسح كاش Cloudflare لروابط هذا التاجر فقط على دومين واجهة المتجر
-    // (الدومين الموجود في Cloudflare) حتى تنعكس التحديثات فوراً بدل انتظار
-    // انتهاء صلاحية الكاش الطبيعية.
+    // 🧹 مسح كاش Cloudflare لروابط هذا التاجر على دومين واجهة المتجر
+    // (الدومين الموجود في Cloudflare عبر STOREFRONT_BASE_URL) حتى تنعكس
+    // التحديثات فوراً بدل انتظار انتهاء صلاحية الكاش الطبيعية.
+    // 🌐 نمسح كمان رابط الموقع نفسه (الصفحة الرئيسية) وليس بس ملفات
+    // الـ JSON، لأن الصفحة المعروضة للزبون ممكن تكون هي نفسها متكاشية.
+    const base = (env.STOREFRONT_BASE_URL || '').replace(/\/+$/, '');
     const cacheUrls = buildStoreFileUrls(
       env,
       files.map((f) => f.path)
     );
+    if (base) cacheUrls.push(base, `${base}/`);
     await purgeCloudflareCache(env, cacheUrls);
   } catch (error) {
     console.error('Catalog Sync Error:', error);

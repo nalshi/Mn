@@ -19,10 +19,16 @@ const MAX_URLS_PER_REQUEST = 30; // حد Cloudflare لمسح الكاش "برا�
 
 export async function purgeCloudflareCache(env, urls) {
   try {
-    if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ZONE_ID) return;
+    if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ZONE_ID) {
+      console.warn('Cloudflare Cache Purge skipped: CLOUDFLARE_API_TOKEN or CLOUDFLARE_ZONE_ID missing');
+      return;
+    }
 
     const files = [...new Set((urls || []).filter(Boolean))];
-    if (!files.length) return;
+    if (!files.length) {
+      console.warn('Cloudflare Cache Purge skipped: no URLs to purge (check STOREFRONT_BASE_URL)');
+      return;
+    }
 
     for (let i = 0; i < files.length; i += MAX_URLS_PER_REQUEST) {
       const chunk = files.slice(i, i + MAX_URLS_PER_REQUEST);
@@ -36,6 +42,8 @@ export async function purgeCloudflareCache(env, urls) {
       });
       if (!res.ok) {
         console.error('Cloudflare Cache Purge failed:', await res.text());
+      } else {
+        console.log('Cloudflare Cache Purge success:', chunk.length, 'file(s):', chunk.join(', '));
       }
     }
   } catch (error) {
