@@ -87,27 +87,45 @@ export async function listProducts({ env, user }) {
 export async function deleteProduct({ env, ctx, user, body }) {
   const pid = body.id;
 
-  // فحص أمني: هل المنتج ضمن طلب نشط حالياً عند زبون؟
+  // ⭐ إصلاح: كان الفحص (هل ضمن طلب نشط؟) والحذف عبارة عن خطوتين منفصلتين
+  // (SELECT ثم DELETE)، وبينهما نافذة زمنية يقدر فيها زبون يُنشئ طلب جديد
+  // لنفس المنتج (create_order) بعد ما ينجح الفحص وقبل ما يُنفَّذ الحذف
+  // فعلياً — فيُحذف منتج أصبح للتو ضمن طلب نشط، رغم "نجاح" الفحص الأمني.
+  // الحل: ندمج الفحص داخل جملة DELETE نفسها عبر NOT EXISTS، فتصير عملية
+  // واحدة ذرّية على مستوى قاعدة البيانات ولا توجد نافذة تصادم إطلاقاً.
   const statusList = ACTIVE_ORDER_STATUSES.map((s) => `'${s}'`).join(',');
-  const activeTicket = await env.DB.prepare(
-    `SELECT ticket_id FROM live_tickets
-     WHERE merchant_id = ?
-     AND status IN (${statusList})
-     AND ticket_data LIKE ? LIMIT 1`
+  const deleteResult = await env.DB.prepare(
+    `DELETE FROM products
+     WHERE id = ? AND merchant_id = ?
+     AND NOT EXISTS (
+       SELECT 1 FROM live_tickets
+       WHERE merchant_id = ?
+       AND status IN (${statusList})
+       AND ticket_data LIKE ?
+     )`
   )
-    .bind(user.user_id, `%"product_id":"${pid}"%`)
-    .first();
-
-  if (activeTicket) {
-    throw new HttpError(
-      'لا يمكنك حذف هذا المنتج حالياً لأنه ضمن طلب نشط لزبون. أنهِ الطلب أو ألغِه أولاً.',
-      409
-    );
-  }
-
-  await env.DB.prepare(`DELETE FROM products WHERE id = ? AND merchant_id = ?`)
-    .bind(pid, user.user_id)
+    .bind(pid, user.user_id, user.user_id, `%"product_id":"${pid}"%`)
     .run();
+
+  const deleted = (deleteResult.meta && deleteResult.meta.changes) || 0;
+
+  if (deleted === 0) {
+    // لم يُحذف شيء: إما أن المنتج غير موجود أصلاً لهذا التاجر، أو أنه
+    // ضمن طلب نشط حالياً (بما فيه طلب استجد بعد الفحص الأول). نميّز
+    // بينهما فقط لأجل رسالة واضحة للتاجر - هذا الفحص هنا للعرض فقط
+    // ولا يؤثر على ذرّية الحذف نفسه أعلاه.
+    const stillExists = await env.DB.prepare(`SELECT id FROM products WHERE id = ? AND merchant_id = ?`)
+      .bind(pid, user.user_id)
+      .first();
+
+    if (stillExists) {
+      throw new HttpError(
+        'لا يمكنك حذف هذا المنتج حالياً لأنه ضمن طلب نشط لزبون. أنهِ الطلب أو ألغِه أولاً.',
+        409
+      );
+    }
+    throw new HttpError('المنتج غير موجود.', 404);
+  }
 
   const remainingProducts = await env.DB.prepare(
     `SELECT * FROM products WHERE merchant_id = ? AND is_available = 1`

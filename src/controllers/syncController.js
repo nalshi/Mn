@@ -1,17 +1,30 @@
 import { HttpError } from '../security/rbac.js';
 import { getCategoriesTree } from '../services/categories/categoryService.js';
 import { ROLES } from '../config/constants.js';
+import { syncStoreInfoToStorefront } from '../services/store/storeInfoSyncService.js';
+import { syncCatalogToStorefront } from '../services/catalog/catalogSyncService.js';
 
 // ========================================================
 // 🔄 تحكم المزامنة والمسارات العامة
 // ========================================================
 
 // محمي بمفتاح داخلي منفصل عن توكن الجلسات (وليس بـ JWT) - يُستدعى من api.php
-export async function syncUser({ env, body, request }) {
+export async function syncUser({ env, ctx, body, request }) {
   const internalKey = request.headers.get('X-Internal-Key') || '';
   if (!env.INTERNAL_SYNC_KEY || internalKey !== env.INTERNAL_SYNC_KEY) {
     throw new HttpError('غير مصرح', 401);
   }
+
+  // ⭐ إصلاح: عند فتح متجر جديد (تسجيل تاجر جديد بـ api.php)، كان هذا
+  // المسار يكتفي بحفظ صف المستخدم بـ D1 فقط، دون رفع أي ملفات (info.json /
+  // manifest / صفحات المنتجات) لمجلد المتجر بـ GitHub ولا عمل أي purge -
+  // فتبقى واجهة المتجر الجديد بلا بيانات (404/فارغة) للزبائن حتى أول
+  // تعديل يدوي من التاجر (منتج أو إعدادات). نتحقق هنا هل الصف موجود
+  // مسبقاً قبل الـ upsert، وإذا كان تاجر جديد فعلاً، نطلق أول مزامنة
+  // لمعلومات المتجر + كتالوج فارغ حتى تُنشأ ملفات المتجر ويُعمل لها purge
+  // من أول لحظة.
+  const existingRow = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`).bind(body.id).first();
+  const isNewStore = !existingRow && body.role === ROLES.MERCHANT;
 
   await env.DB.prepare(
     `INSERT INTO users (id, username, role, store_name, phone, store_type, settings, fcm_token, created_at)
@@ -36,6 +49,26 @@ export async function syncUser({ env, body, request }) {
       body.created_at || Date.now()
     )
     .run();
+
+  if (isNewStore && body.username) {
+    let initialSettings = {};
+    try {
+      initialSettings = body.settings ? JSON.parse(body.settings) : {};
+    } catch (e) {
+      initialSettings = {};
+    }
+    ctx.waitUntil(
+      syncStoreInfoToStorefront(env, body.username, {
+        store_name: body.store_name || body.username,
+        store_type: body.store_type || null,
+        phone: body.phone || null,
+        settings: initialSettings,
+      })
+    );
+    // متجر جديد = بلا منتجات بعد، لكن لازم تُنشأ ملفات الكتالوج (فارغة)
+    // ويُعمل لها purge حتى لا تفشل واجهة المتجر بالبحث عنها لأول مرة.
+    ctx.waitUntil(syncCatalogToStorefront(env, body.username, body.id, []));
+  }
 
   return { message: 'تمت مزامنة المستخدم' };
 }

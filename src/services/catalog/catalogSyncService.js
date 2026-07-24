@@ -1,5 +1,6 @@
 import { commitMultipleFiles } from '../storage/providers/githubProvider.js';
-import { purgeCloudflareCache, buildStoreFileUrls } from '../storage/providers/cloudflareCacheProvider.js';
+import { purgeCloudflareCache } from '../storage/providers/cloudflareCacheProvider.js';
+import { enqueueSync } from '../storage/syncQueue.js';
 
 // ========================================================
 // ⚡ خدمة مزامنة كتالوج المتجر (منتجات + فئات) إلى GitHub
@@ -17,7 +18,14 @@ function safeParse(str, fallback) {
   }
 }
 
+// ⭐ ملاحظة: الدالة المُصدَّرة تمرر التنفيذ الفعلي عبر enqueueSync حتى تُسلسَل
+// كل عمليات الكتابة على GitHub (راجع تعليق syncQueue.js لتفاصيل سبب الحاجة
+// لهذا - منع كوميت متأخر يمحو تعديل أحدث بصمت بعد أن نفّذنا purge له فعلاً).
 export async function syncCatalogToStorefront(env, username, merchantId, products) {
+  return enqueueSync(() => runCatalogSync(env, username, merchantId, products));
+}
+
+async function runCatalogSync(env, username, merchantId, products) {
   try {
     let catRows = [];
     if (merchantId) {
@@ -130,18 +138,11 @@ export async function syncCatalogToStorefront(env, username, merchantId, product
     await commitMultipleFiles(env, files, `⚡ Auto-sync via Worker [${username}]`);
     console.log(`[Catalog Sync Success] ${username}`);
 
-    // 🧹 مسح كاش Cloudflare لروابط هذا التاجر على دومين واجهة المتجر
-    // (الدومين الموجود في Cloudflare عبر STOREFRONT_BASE_URL) حتى تنعكس
-    // التحديثات فوراً بدل انتظار انتهاء صلاحية الكاش الطبيعية.
-    // 🌐 نمسح كمان رابط الموقع نفسه (الصفحة الرئيسية) وليس بس ملفات
-    // الـ JSON، لأن الصفحة المعروضة للزبون ممكن تكون هي نفسها متكاشية.
-    const base = (env.STOREFRONT_BASE_URL || '').replace(/\/+$/, '');
-    const cacheUrls = buildStoreFileUrls(
-      env,
-      files.map((f) => f.path)
-    );
-    if (base) cacheUrls.push(base, `${base}/`);
-    await purgeCloudflareCache(env, cacheUrls);
+    // 🧹 مسح كاش Cloudflare بالكامل (Purge Everything) حتى تنعكس التحديثات
+    // فوراً. تم التأكد يدوياً إن مسح روابط محددة ما يشتغل فعلياً على هذا
+    // الـ Zone (على الأغلب بسبب Cache Rule بمفتاح كاش مخصص)، فاستخدمنا
+    // Purge Everything لأنه الوحيد المؤكد إنه يعمل.
+    await purgeCloudflareCache(env);
   } catch (error) {
     console.error('Catalog Sync Error:', error);
   }

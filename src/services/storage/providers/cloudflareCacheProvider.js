@@ -1,21 +1,24 @@
 // ========================================================
 // ☁️ مزود مسح الكاش: Cloudflare Cache Purge
-// طبقة منخفضة المستوى فقط (بنفس روح githubProvider.js): تستقبل
-// روابط ملفات واجهة المتجر وتطلب من Cloudflare مسح الكاش الخاص
-// بها تحديداً، على "الدومين الموجود في Cloudflare" فقط (Zone واحد
-// محدد عبر CLOUDFLARE_ZONE_ID) — لا علاقة له بروابط GitHub/jsdelivr
-// نفسها، فقط الدومين المخصص لواجهة المتجر الذي يمر عبر Cloudflare.
+// ⚠️ ملاحظة مهمة (2026-07-24): جرّبنا "مسح روابط محددة" (purge by URL)
+// وطلعت الاستجابة "success" دائماً لكن الكاش الفعلي ما ينمسح — على الأغلب
+// بسبب Cache Rule بمفتاح كاش مخصص (Custom Cache Key) على الـ Zone يخلي
+// مفتاح الكاش الداخلي مختلف عن الرابط الظاهري، فمسح رابط بعينه ما يطابقه.
+// تم التأكيد يدويًا إن "Purge Everything" هو الوحيد اللي يشتغل فعليًا على
+// هذا الـ Zone، فتحوّلنا له بدل مسح الروابط الفردية.
 //
 // ⚙️ متغيرات بيئة مطلوبة (secrets/vars على الـ Worker):
 //   - CLOUDFLARE_API_TOKEN  : توكن بصلاحية "Cache Purge" على الـ Zone فقط
 //   - CLOUDFLARE_ZONE_ID    : معرّف الـ Zone الخاص بدومين واجهة المتجر
-//   - STOREFRONT_BASE_URL   : رابط واجهة المتجر العام (مثال: https://store.example.com)
 // إذا لم تكن مُهيأة، الدالة تتجاهل العملية بصمت (نفس نمط باقي
 // المزامنات الخلفية بالمشروع) حتى لا تكسر مزامنة GitHub الأساسية.
+// ⚠️ حد Cloudflare لـ Purge Everything على الخطة المجانية: 5 طلبات/دقيقة
+// (مشترك مع باقي أنواع الـ purge غير purge-by-URL). لو صار عندك رفع
+// منتجات متكرر جداً بفارق ثوانٍ، ممكن تشوف أخطاء 429 - وهذا متوقع ومقبول
+// بما إن الموقع متجر واحد صغير.
 // ========================================================
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
-const MAX_URLS_PER_REQUEST = 30; // حد Cloudflare لمسح الكاش "برابط ملف واحد"
 
 export async function purgeCloudflareCache(env, urls) {
   try {
@@ -24,27 +27,19 @@ export async function purgeCloudflareCache(env, urls) {
       return;
     }
 
-    const files = [...new Set((urls || []).filter(Boolean))];
-    if (!files.length) {
-      console.warn('Cloudflare Cache Purge skipped: no URLs to purge (check STOREFRONT_BASE_URL)');
-      return;
-    }
+    const res = await fetch(`${CF_API}/zones/${env.CLOUDFLARE_ZONE_ID}/purge_cache`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ purge_everything: true }),
+    });
 
-    for (let i = 0; i < files.length; i += MAX_URLS_PER_REQUEST) {
-      const chunk = files.slice(i, i + MAX_URLS_PER_REQUEST);
-      const res = await fetch(`${CF_API}/zones/${env.CLOUDFLARE_ZONE_ID}/purge_cache`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ files: chunk }),
-      });
-      if (!res.ok) {
-        console.error('Cloudflare Cache Purge failed:', await res.text());
-      } else {
-        console.log('Cloudflare Cache Purge success:', chunk.length, 'file(s):', chunk.join(', '));
-      }
+    if (!res.ok) {
+      console.error('Cloudflare Cache Purge failed:', await res.text());
+    } else {
+      console.log('Cloudflare Cache Purge success: purge_everything');
     }
   } catch (error) {
     console.error('Cloudflare Cache Purge Error:', error);

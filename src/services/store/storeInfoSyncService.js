@@ -1,5 +1,9 @@
 import { commitMultipleFiles } from '../storage/providers/githubProvider.js';
 import { purgeCloudflareCache, buildStoreFileUrls } from '../storage/providers/cloudflareCacheProvider.js';
+// ⭐ نفس طابور التسلسل المستخدم بـ catalogSyncService.js، لأن الاثنين يكتبان
+// على نفس فرع GitHub (heads/main) المشترك بين كل التجار - لازم يُسلسلا معاً
+// وليس كل واحد بطابوره الخاص، وإلا يبقى نفس احتمال التصادم بينهما.
+import { enqueueSync } from '../storage/syncQueue.js';
 
 // ========================================================
 // 🏪 خدمة مزامنة معلومات المتجر (info.json) إلى GitHub
@@ -10,6 +14,10 @@ import { purgeCloudflareCache, buildStoreFileUrls } from '../storage/providers/c
 // ========================================================
 
 export async function syncStoreInfoToStorefront(env, username, storeInfo) {
+  return enqueueSync(() => runStoreInfoSync(env, username, storeInfo));
+}
+
+async function runStoreInfoSync(env, username, storeInfo) {
   try {
     if (!username) return;
 
