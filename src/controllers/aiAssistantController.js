@@ -6,6 +6,7 @@ import {
   sanitizeTone,
   sanitizeCustomRules,
   sanitizeCustomerMessage,
+  sanitizeConversationHistory,
   sanitizePlainText,
   escapeHtml,
 } from '../services/ai/sanitize.js';
@@ -28,6 +29,27 @@ const MAX_PRODUCTS_IN_PROMPT = 20;
 // ========================================================
 const GEMINI_MODEL = 'gemini-3.6-flash';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+// --------------------------------------------------------
+// 🔍 استخراج كلمات بحث مفيدة من رسالة العميل لجلب المنتجات ذات الصلة
+// فعلياً بدل الاعتماد فقط على "آخر المنتجات المحدَّثة". نتجاهل كلمات
+// الوقف الشائعة (أدوات ربط/طلب) والكلمات القصيرة جداً، ونكتفي بعدد
+// محدود من الكلمات لتفادي استعلامات SQL طويلة بلا داعٍ.
+// --------------------------------------------------------
+const SEARCH_STOPWORDS = new Set([
+  'في', 'من', 'الى', 'إلى', 'على', 'عن', 'هل', 'ابغى', 'أبغى', 'اريد', 'أريد',
+  'ابي', 'أبي', 'ابغا', 'ودي', 'ممكن', 'لو', 'سمحت', 'فيه', 'عندكم', 'متوفر',
+  'متوفره', 'بكم', 'سعر', 'كم', 'وين', 'فين', 'هذا', 'هذه', 'ذا', 'شي', 'شيء',
+  'كيف', 'ايش', 'إيش', 'وش', 'انا', 'أنا', 'انتوا', 'عندك', 'موجود', 'موجودة',
+]);
+
+function extractSearchTerms(message) {
+  return String(message || '')
+    .split(/\s+/)
+    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ''))
+    .filter((w) => w.length >= 2 && !SEARCH_STOPWORDS.has(w))
+    .slice(0, 5);
+}
 
 // --------------------------------------------------------
 // جلب إعدادات المساعد الخاصة بالتاجر الحالي (يستخدمها التاجر عند فتح
@@ -118,6 +140,10 @@ export async function aiChat({ request, env, ctx, body }) {
   const customerMessage = sanitizeCustomerMessage(body.message);
   if (!customerMessage) throw new HttpError('الرسالة فارغة', 400);
 
+  // 🧼 تعقيم سجل المحادثة السابق (اختياري) - يسمح للمساعد بربط الرسالة
+  // الحالية بسياق ما قبلها بدل معاملة كل رسالة بمعزل تام عن سابقاتها
+  const conversationHistory = sanitizeConversationHistory(body.history);
+
   // --- جلب إعدادات المساعد الخاصة بهذا التاجر (Prepared Statement) ---
   const settingsRow = await env.DB.prepare(
     `SELECT ai_enabled, bot_name, tone, custom_rules FROM merchant_ai_settings WHERE merchant_id = ?`
@@ -145,8 +171,40 @@ export async function aiChat({ request, env, ctx, body }) {
     .first();
   const storeName = storeRow?.store_name || storeRow?.username || 'المتجر';
 
-  // --- جلب أول 20 منتج نشط لهذا التاجر (Prepared Statement) ---
-  const productsResult = await env.DB.prepare(
+  // --- جلب المنتجات ذات الصلة برسالة العميل أولاً (Prepared Statement) ---
+  // ⭐ إصلاح: كنا نجلب فقط آخر 20 منتج مُحدَّث بغض النظر عن سؤال العميل،
+  // فلو كان للتاجر أكثر من 20 منتج، أي سؤال عن منتج غير موجود ضمن هذه
+  // العشرين "الأحدث تحديثاً" كان يخلي النموذج (بحكم تعليماته الصارمة ضد
+  // الاختلاق) يرد بأن المنتج "غير متوفر" رغم أنه موجود فعلاً في المتجر.
+  // الحل: نبحث أولاً عن منتجات تُطابق كلمات رسالة العميل، ثم نكمل القائمة
+  // بآخر المنتجات المحدَّثة، مع إزالة التكرار.
+  // نضم آخر رسالة سابقة من العميل (إن وجدت) لاستخراج كلمات البحث، حتى لو
+  // كانت رسالته الحالية رد متابعة قصير مثل "زوده" أو "بكم التوصيل له" بدون
+  // ذكر اسم المنتج مرة أخرى - هذا هو المقصود بـ"ربط الرسائل السابقة".
+  const lastUserTurn = [...conversationHistory].reverse().find((m) => m.role === 'user');
+  const searchTerms = extractSearchTerms(
+    lastUserTurn ? `${lastUserTurn.text} ${customerMessage}` : customerMessage
+  );
+
+  let matchedProducts = [];
+  if (searchTerms.length > 0) {
+    const likeClauses = searchTerms.map(() => `(name LIKE ? OR description LIKE ?)`).join(' OR ');
+    const likeBinds = [];
+    searchTerms.forEach((t) => likeBinds.push(`%${t}%`, `%${t}%`));
+
+    const matchedResult = await env.DB.prepare(
+      `SELECT id, name, price, discount, currency, quantity
+       FROM products
+       WHERE merchant_id = ? AND is_available = 1 AND (${likeClauses})
+       ORDER BY updated_at DESC
+       LIMIT ?`
+    )
+      .bind(merchantId, ...likeBinds, MAX_PRODUCTS_IN_PROMPT)
+      .all();
+    matchedProducts = matchedResult.results || [];
+  }
+
+  const recentResult = await env.DB.prepare(
     `SELECT id, name, price, discount, currency, quantity
      FROM products
      WHERE merchant_id = ? AND is_available = 1
@@ -156,12 +214,21 @@ export async function aiChat({ request, env, ctx, body }) {
     .bind(merchantId, MAX_PRODUCTS_IN_PROMPT)
     .all();
 
+  const seenIds = new Set();
+  const relevantProducts = [];
+  for (const p of [...matchedProducts, ...(recentResult.results || [])]) {
+    if (seenIds.has(p.id)) continue;
+    seenIds.add(p.id);
+    relevantProducts.push(p);
+    if (relevantProducts.length >= MAX_PRODUCTS_IN_PROMPT) break;
+  }
+
   const systemPrompt = buildMasterSystemPrompt({
     storeName,
     botName: settingsRow.bot_name,
     tone: settingsRow.tone,
     customRules,
-    products: productsResult.results || [],
+    products: relevantProducts,
   });
 
   // --- استدعاء نموذج الذكاء الاصطناعي (Gemini 3.6 Flash عبر fetch مباشر) ---
@@ -179,8 +246,25 @@ export async function aiChat({ request, env, ctx, body }) {
       },
       body: JSON.stringify({
         system_instruction: { parts: [{ text: systemPrompt }] },
-        contents: [{ role: 'user', parts: [{ text: customerMessage }] }],
-        generationConfig: { maxOutputTokens: 400 },
+        // ⭐ نُرسل سجل المحادثة السابق (المُعقَّم) قبل رسالة العميل الحالية،
+        // حتى يقدر النموذج يفهم السياق المتصل (مثل الإشارة لمنتج ذُكر قبل
+        // رسالتين) بدل معاملة كل رسالة وكأنها محادثة جديدة تماماً.
+        contents: [
+          ...conversationHistory.map((turn) => ({ role: turn.role, parts: [{ text: turn.text }] })),
+          { role: 'user', parts: [{ text: customerMessage }] },
+        ],
+        // ⭐ إصلاح جوهري: Gemini 3.6 Flash نموذج "تفكير" (thinking model) بشكل
+        // افتراضي، وحد الـ maxOutputTokens في REST API يُحسب مشتركاً بين
+        // "توكنات التفكير الداخلي" و"نص الرد الفعلي" معاً. كان الحد القديم
+        // (400) يُستهلك بالكامل تقريباً في التفكير الداخلي، فيخرج النموذج
+        // برد فارغ أو مقطوع منتصف الكلمة (finishReason: MAX_TOKENS بدون نص،
+        // أو نص ناقص) - وهذا بالضبط سبب "الأجوبة الناقصة/غير المفهومة".
+        // الحل: خفض عمق التفكير لأدنى مستوى (المهمة هنا محادثة مبيعات بسيطة
+        // لا تحتاج تفكيراً عميقاً) + رفع الحد الأقصى ليتسع لرد كامل مريح.
+        generationConfig: {
+          maxOutputTokens: 2048,
+          thinkingConfig: { thinkingLevel: 'low' },
+        },
       }),
     });
 
@@ -190,7 +274,16 @@ export async function aiChat({ request, env, ctx, body }) {
     }
 
     const geminiData = await geminiRes.json();
-    aiReplyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    // ⭐ نجمع كل أجزاء النص (parts) بدل الاكتفاء بالجزء الأول فقط، ونتجاهل أي
+    // جزء يمثّل "تفكير داخلي" (thought: true) كطبقة دفاع إضافية - رغم أننا لا
+    // نطلب إرجاع التفكير أصلاً (includeThoughts غير مفعّلة)، فبعض الردود قد
+    // تحتوي أكثر من جزء نصي واحد.
+    const parts = geminiData?.candidates?.[0]?.content?.parts || [];
+    aiReplyText = parts
+      .filter((p) => p && typeof p.text === 'string' && !p.thought)
+      .map((p) => p.text)
+      .join('')
+      .trim();
   } catch (error) {
     // 🔍 تسجيل مؤقت لتشخيص سبب فشل استدعاء Gemini الفعلي - يظهر في
     // `wrangler tail` فقط (لا يُرسل للعميل، الرسالة العامة أدناه هي فقط اللي

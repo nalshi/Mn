@@ -69,3 +69,32 @@ export function sanitizeCustomRules(rawRules) {
 export function sanitizeCustomerMessage(message) {
   return sanitizePlainText(String(message || ''), 1000);
 }
+
+// سجل المحادثة السابق (يُرسَل من الواجهة الأمامية مع كل رسالة جديدة حتى
+// يقدر المساعد يربط سؤال العميل الحالي بسياق ما قبله، مثل: "زوّده" بعد
+// ما سأل عن منتج معيّن). نتعامل معه كبيانات غير موثوقة تماماً مثل رسالة
+// العميل نفسها:
+//   - نقبل فقط الأدوار المعروفة (user / assistant)
+//   - نُعقّم كل رسالة بنفس طريقة رسالة العميل (لا HTML، طول محدود)
+//   - نحدّ عدد الأسطر المقبولة من السجل لمنع تضخيم الطلب (وبالتالي التكلفة)
+//     أو محاولة إغراق النموذج بسياق طويل مصطنع
+const MAX_HISTORY_TURNS = 12; // عدد الرسائل (وليس المحادثات) الأخيرة المقبولة
+const MAX_HISTORY_MESSAGE_LENGTH = 600;
+
+export function sanitizeConversationHistory(rawHistory) {
+  if (!Array.isArray(rawHistory)) return [];
+
+  const cleaned = rawHistory
+    .filter((item) => item && (item.role === 'user' || item.role === 'assistant'))
+    .slice(-MAX_HISTORY_TURNS)
+    .map((item) => ({
+      role: item.role === 'assistant' ? 'model' : 'user',
+      text: sanitizePlainText(String(item.message || item.text || ''), MAX_HISTORY_MESSAGE_LENGTH),
+    }))
+    .filter((item) => item.text.length > 0);
+
+  // Gemini يشترط أن تبدأ المحادثة بدور "user" - نحذف أي رسائل "model" في
+  // بداية السجل (مثل رسالة ترحيب آلية) قد تتسبب بخطأ 400 من الـ API.
+  const firstUserIndex = cleaned.findIndex((item) => item.role === 'user');
+  return firstUserIndex === -1 ? [] : cleaned.slice(firstUserIndex);
+}
