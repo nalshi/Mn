@@ -19,7 +19,11 @@ import {
 // ========================================================
 
 const MAX_PRODUCTS_IN_PROMPT = 20;
-const AI_MODEL = '@cf/meta/llama-3-8b-instruct'; // يمكن تبديله لاحقاً بموديل Gemini عبر واجهة موحدة
+const AI_MODEL = '@cf/meta/llama-3.1-8b-instruct'; // يمكن تبديله لاحقاً بموديل Gemini عبر واجهة موحدة
+// ⚠️ ملاحظة (2026-07-25): كان مضبوطاً على @cf/meta/llama-3-8b-instruct، لكنه
+// مدرج ضمن قائمة Cloudflare للموديلات المخطط إيقافها (Planned Deprecations)
+// وهو سبب فشل استدعاء env.AI.run() الذي شوهد فعلياً. تم التبديل لـ llama-3.1
+// لأنه نفس الحجم تقريباً ومدعوم رسمياً حالياً بكل الوثائق والأمثلة.
 
 // --------------------------------------------------------
 // جلب إعدادات المساعد الخاصة بالتاجر الحالي (يستخدمها التاجر عند فتح
@@ -29,7 +33,7 @@ export async function getAiAssistantConfig({ env, user }) {
   const row = await env.DB.prepare(
     `SELECT ai_enabled, bot_name, tone, custom_rules FROM merchant_ai_settings WHERE merchant_id = ?`
   )
-    .bind(user.user_id)
+    .bind(String(user.user_id))
     .first();
 
   if (!row) {
@@ -86,7 +90,7 @@ export async function saveAiAssistantConfig({ env, user, body }) {
        custom_rules = excluded.custom_rules,
        updated_at = excluded.updated_at`
   )
-    .bind(user.user_id, aiEnabled, botName, tone, JSON.stringify(customRules), Date.now())
+    .bind(String(user.user_id), aiEnabled, botName, tone, JSON.stringify(customRules), Date.now())
     .run();
 
   return {
