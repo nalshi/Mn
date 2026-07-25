@@ -19,13 +19,15 @@ import {
 // ========================================================
 
 const MAX_PRODUCTS_IN_PROMPT = 20;
-const AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8'; // يمكن تبديله لاحقاً بموديل Gemini عبر واجهة موحدة
-// ⚠️ ملاحظة (2026-07-25): جرّبنا @cf/meta/llama-3-8b-instruct ثم
-// @cf/meta/llama-3.1-8b-instruct - كلاهما تبيّن أنهما مُدرجان ضمن دفعة
-// إيقاف Cloudflare بتاريخ 2026-05-30 (رسالة الخطأ الفعلية: "5028: This
-// model was deprecated..." - ظهرت فقط بعد إضافة console.error بالأسفل).
-// @cf/meta/llama-3.1-8b-instruct-fp8 هو حالياً "flagship" نشط حسب كتالوج
-// Cloudflay الرسمي (تحقّق منه وقت الحاجة عبر: wrangler ai models).
+
+// ========================================================
+// 🤖 محرّك النموذج: Gemini 3.6 Flash (بدّلناه عن Workers AI بناءً على طلب
+// التاجر). يحتاج سر جديد بالحساب:
+//   wrangler secret put GEMINI_API_KEY
+// (الحصول على المفتاح من: https://aistudio.google.com/apikey)
+// ========================================================
+const GEMINI_MODEL = 'gemini-3.6-flash';
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 // --------------------------------------------------------
 // جلب إعدادات المساعد الخاصة بالتاجر الحالي (يستخدمها التاجر عند فتح
@@ -162,22 +164,38 @@ export async function aiChat({ request, env, ctx, body }) {
     products: productsResult.results || [],
   });
 
-  // --- استدعاء نموذج الذكاء الاصطناعي (Cloudflare Workers AI) ---
+  // --- استدعاء نموذج الذكاء الاصطناعي (Gemini 3.6 Flash عبر fetch مباشر) ---
   let aiReplyText;
   try {
-    const aiResponse = await env.AI.run(AI_MODEL, {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: customerMessage },
-      ],
-      max_tokens: 400,
+    if (!env.GEMINI_API_KEY) {
+      throw new Error('GEMINI_API_KEY غير مضبوط (نفّذ: wrangler secret put GEMINI_API_KEY)');
+    }
+
+    const geminiRes = await fetch(GEMINI_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': env.GEMINI_API_KEY,
+      },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: customerMessage }] }],
+        generationConfig: { maxOutputTokens: 400 },
+      }),
     });
-    aiReplyText = aiResponse?.response || '';
+
+    if (!geminiRes.ok) {
+      const errText = await geminiRes.text().catch(() => '');
+      throw new Error(`Gemini HTTP ${geminiRes.status}: ${errText.slice(0, 300)}`);
+    }
+
+    const geminiData = await geminiRes.json();
+    aiReplyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
   } catch (error) {
-    // 🔍 تسجيل مؤقت لتشخيص سبب فشل استدعاء Workers AI الفعلي - يظهر في
+    // 🔍 تسجيل مؤقت لتشخيص سبب فشل استدعاء Gemini الفعلي - يظهر في
     // `wrangler tail` فقط (لا يُرسل للعميل، الرسالة العامة أدناه هي فقط اللي
     // يشوفها العميل، حفاظاً على عدم تسريب تفاصيل داخلية للطرف العام).
-    console.error('❌ [ai_chat] فشل استدعاء env.AI.run:', error && error.message, error);
+    console.error('❌ [ai_chat] فشل استدعاء Gemini API:', error && error.message, error);
     throw new HttpError('تعذّر الحصول على رد من المساعد الذكي حالياً، حاول لاحقاً.', 502);
   }
 
