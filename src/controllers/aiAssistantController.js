@@ -172,6 +172,10 @@ export async function aiChat({ request, env, ctx, body }) {
     });
     aiReplyText = aiResponse?.response || '';
   } catch (error) {
+    // 🔍 تسجيل مؤقت لتشخيص سبب فشل استدعاء Workers AI الفعلي - يظهر في
+    // `wrangler tail` فقط (لا يُرسل للعميل، الرسالة العامة أدناه هي فقط اللي
+    // يشوفها العميل، حفاظاً على عدم تسريب تفاصيل داخلية للطرف العام).
+    console.error('❌ [ai_chat] فشل استدعاء env.AI.run:', error && error.message, error);
     throw new HttpError('تعذّر الحصول على رد من المساعد الذكي حالياً، حاول لاحقاً.', 502);
   }
 
