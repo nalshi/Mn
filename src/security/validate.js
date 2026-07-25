@@ -34,6 +34,9 @@ const rules = {
       throw new HttpError('اسم المتجر مطلوب', 400);
     }
   },
+  // ⭐ إضافة: المساعد الذكي الخاص بكل تاجر
+  save_ai_assistant_config: (body) => requireFields(body, ['bot_name', 'tone']),
+  ai_chat: (body) => requireFields(body, ['merchant_id', 'message']),
 };
 
 export function validateAction(action, body, user) {

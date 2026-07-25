@@ -3,6 +3,7 @@ import * as productController from './controllers/productController.js';
 import * as orderController from './controllers/orderController.js';
 import * as storeController from './controllers/storeController.js';
 import * as syncController from './controllers/syncController.js';
+import * as aiAssistantController from './controllers/aiAssistantController.js'; // ⭐ إضافة: المساعد الذكي
 import { ROLES } from './config/constants.js';
 
 // ========================================================
@@ -44,6 +45,14 @@ export const actionRegistry = {
     roles: [ROLES.MERCHANT, ROLES.DELIVERY],
   },
   save_merchant_settings: { handler: storeController.saveMerchantSettings, roles: [ROLES.MERCHANT] },
+
+  // 🤖 المساعد الذكي الخاص بكل تاجر (⭐ إضافة جديدة)
+  // - get/save_ai_assistant_config: للتاجر فقط، عبر لوحة التاجر (JWT + دور MERCHANT)
+  // - ai_chat: عام (public) - يستخدمه عميل المتجر من ودجت الدردشة بدون تسجيل دخول،
+  //   ومحمي بدلاً من ذلك بتحديد المعدل (rate limiting) داخل الـ controller نفسه.
+  get_ai_assistant_config: { handler: aiAssistantController.getAiAssistantConfig, roles: [ROLES.MERCHANT] },
+  save_ai_assistant_config: { handler: aiAssistantController.saveAiAssistantConfig, roles: [ROLES.MERCHANT] },
+  ai_chat: { handler: aiAssistantController.aiChat, roles: [], public: true },
 
   // 🔄 عام / مزامنة
   sync_user: { handler: syncController.syncUser, roles: [], public: true },
