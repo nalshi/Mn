@@ -43,12 +43,33 @@ const SEARCH_STOPWORDS = new Set([
   'كيف', 'ايش', 'إيش', 'وش', 'انا', 'أنا', 'انتوا', 'عندك', 'موجود', 'موجودة',
 ]);
 
+// ⭐ إصلاح (2026-07-26): D1 يفرض حد صارم 50 بايت كحد أقصى لطول أي نمط
+// LIKE/GLOB (راجع حدود D1 الرسمية). كنا نبني النمط بـ `%${term}%` بدون أي
+// سقف على طول الكلمة نفسها - فلو كتب العميل كلمة طويلة (خصوصاً كلمات
+// عربية، كل حرف منها بايتين UTF-8) يتجاوز النمط الناتج 50 بايت ويطلع
+// "LIKE or GLOB pattern too complex" ويفشل المساعد الذكي بالكامل بدل ما
+// يرد على العميل. الحل: نقص كل كلمة بحث إلى حد آمن بالبايتات (وليس
+// بعدد الأحرف، لأن حرف عربي واحد قد يكون بايتين) قبل استخدامها بأي LIKE،
+// بحيث يبقى النمط الكامل (شاملاً %% المحيطة) دايماً أقل من 50 بايت.
+const MAX_LIKE_TERM_BYTES = 20; // + 2 بايت لعلامتي % = 22 بايت كحد أقصى للنمط، بأمان تحت حد D1 (50)
+
+function truncateToByteLimit(str, maxBytes) {
+  const bytes = new TextEncoder().encode(str);
+  if (bytes.length <= maxBytes) return str;
+  // نقص للحد المطلوب ثم نفكّ الترميز بتساهل (fatal: false) حتى لو قطعنا
+  // بمنتصف حرف متعدد البايتات، ثم نتخلص من أي محارف بديلة (�) ناتجة عن
+  // القطع الجزئي في النهاية.
+  const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, maxBytes));
+  return decoded.replace(/\uFFFD+$/, '');
+}
+
 function extractSearchTerms(message) {
   return String(message || '')
     .split(/\s+/)
     .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ''))
     .filter((w) => w.length >= 2 && !SEARCH_STOPWORDS.has(w))
-    .slice(0, 5);
+    .slice(0, 5)
+    .map((w) => truncateToByteLimit(w, MAX_LIKE_TERM_BYTES));
 }
 
 // --------------------------------------------------------

@@ -93,18 +93,27 @@ export async function deleteProduct({ env, ctx, user, body }) {
   // فعلياً — فيُحذف منتج أصبح للتو ضمن طلب نشط، رغم "نجاح" الفحص الأمني.
   // الحل: ندمج الفحص داخل جملة DELETE نفسها عبر NOT EXISTS، فتصير عملية
   // واحدة ذرّية على مستوى قاعدة البيانات ولا توجد نافذة تصادم إطلاقاً.
+  //
+  // ⭐ إصلاح ثانٍ (2026-07-26): كان الفحص يستخدم
+  // `ticket_data LIKE '%"product_id":"<pid>"%'` - لكن D1 يفرض حد صارم:
+  // أقصى طول لنمط LIKE/GLOB هو 50 بايت فقط (راجع حدود D1 الرسمية). بما
+  // أن pid وحده ("PROD-" + UUID) طوله ~41 حرف، النمط الكامل يتجاوز الـ 50
+  // بايت بسهولة فيطلع خطأ "LIKE or GLOB pattern too complex" عند كل
+  // عملية حذف. الحل: نستبدل LIKE بمطابقة دقيقة عبر دوال JSON (json_each/
+  // json_extract) المتوفرة في D1 - ما فيها هذا الحد، وهي أدق لأنها تطابق
+  // قيمة product_id كاملة داخل مصفوفة items وليس نص فرعي عشوائي.
   const statusList = ACTIVE_ORDER_STATUSES.map((s) => `'${s}'`).join(',');
   const deleteResult = await env.DB.prepare(
     `DELETE FROM products
      WHERE id = ? AND merchant_id = ?
      AND NOT EXISTS (
-       SELECT 1 FROM live_tickets
-       WHERE merchant_id = ?
-       AND status IN (${statusList})
-       AND ticket_data LIKE ?
+       SELECT 1 FROM live_tickets, json_each(json_extract(live_tickets.ticket_data, '$.items')) AS item
+       WHERE live_tickets.merchant_id = ?
+       AND live_tickets.status IN (${statusList})
+       AND json_extract(item.value, '$.product_id') = ?
      )`
   )
-    .bind(pid, user.user_id, user.user_id, `%"product_id":"${pid}"%`)
+    .bind(pid, user.user_id, user.user_id, pid)
     .run();
 
   const deleted = (deleteResult.meta && deleteResult.meta.changes) || 0;

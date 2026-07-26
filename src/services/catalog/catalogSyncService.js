@@ -1,5 +1,6 @@
 import { commitMultipleFiles } from '../storage/providers/githubProvider.js';
 import { purgeCloudflareCache } from '../storage/providers/cloudflareCacheProvider.js';
+import { waitForVercelDeployment } from '../storage/providers/vercelDeployProvider.js';
 import { enqueueSync } from '../storage/syncQueue.js';
 
 // ========================================================
@@ -135,16 +136,19 @@ async function runCatalogSync(env, username, merchantId, products) {
       }),
     });
 
-    await commitMultipleFiles(env, files, `⚡ Auto-sync via Worker [${username}]`);
+    const commitSha = await commitMultipleFiles(env, files, `⚡ Auto-sync via Worker [${username}]`);
     console.log(`[Catalog Sync Success] ${username}`);
 
-    // ⏳ تأخير قصير قبل مسح الكاش: كوميت GitHub ينجح فوراً، لكن انتشار
-    // الملفات الفعلية عبر GitHub/jsDelivr يحتاج لحظات. لو مسحنا كاش
-    // Cloudflare فوراً، أول طلب يجي بعد المسح مباشرة يقرأ نسخة قديمة
-    // من GitHub/jsDelivr ويعيد تخزينها بالكاش من جديد - فتوصل النتيجة
-    // "الـ purge اشتغل بس القديم رجع". الحل: نستنى قبل المسح حتى تصير
-    // فرصة كافية للانتشار.
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // ⏳ ننتظر فعلياً لين نشر Vercel المرتبط بهذا الكوميت بالذات يصير
+    // READY - مو تأخير ثابت تخميني. الموقع الحقيقي منشور على Vercel،
+    // وVercel يبني نشر جديد من نفس كوميت GitHub؛ هذا البناء قد ياخذ
+    // ثوانٍ أو دقيقة كاملة حسب الحمل. لو مسحنا كاش Cloudflare قبل
+    // اكتمال هذا النشر، أول طلب بعد المسح يوصل للنشر *السابق* على
+    // Vercel ويُخزَّن بالكاش من جديد - فترجع النسخة القديمة رغم "نجاح"
+    // الـ purge. راجع تعليق vercelDeployProvider.js لتفاصيل أكثر.
+    // لو ما كانت متغيرات Vercel مهيأة، الدالة ترجع false فوراً وننتقل
+    // للـ purge مباشرة (نفس السلوك القديم كـ fallback).
+    await waitForVercelDeployment(env, commitSha);
 
     // 🧹 مسح كاش Cloudflare بالكامل (Purge Everything) حتى تنعكس التحديثات
     // فوراً. تم التأكد يدوياً إن مسح روابط محددة ما يشتغل فعلياً على هذا

@@ -73,4 +73,8 @@ export async function commitMultipleFiles(env, files, commitMessage) {
     headers,
     body: JSON.stringify({ sha: newCommitRes.sha }),
   });
+
+  // نرجّع الـ SHA حتى يقدر المستدعي يطابقه مع نشر Vercel المرتبط بهذا
+  // الكوميت بالضبط (بدل انتظار أعمى بدون معرفة أي نشر يخص أي تحديث).
+  return newCommitRes.sha;
 }
