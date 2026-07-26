@@ -466,7 +466,20 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
     // بعملة YER (عملة رسوم التوصيل الأساسية)، فنستخدم فقط إجمالي منتجات YER
     // لهذا التاجر لهذا الغرض تحديداً — لا نخلطها بعملات أخرى.
     const yerSubtotal = itemsByCurrency['YER']?.totalProductsPrice || 0;
-    overallCartTotal += yerSubtotal;
+
+    // ⭐ إصلاح (2026-07-26): كان overallCartTotal يجمع فقط yerSubtotal،
+    // فيتجاهل تماماً أي عملة ثانية (مثلاً USD). النتيجة: طلب كله بعملة
+    // غير اليمني يفضل overallCartTotal = 0 عنده ويُرفض دايماً بغض النظر
+    // عن قيمته الفعلية، وطلب مختلط (يمني + دولار) يُحسب فيه جزء اليمني
+    // فقط فيُرفض رغم أن القيمة الكلية أكبر من الحد الأدنى. نجمع هنا كل
+    // مجموعات العملات (وليس فقط YER) لغرض فحص الحد الأدنى تحديداً - أما
+    // yerSubtotal نفسه يبقى بدون أي تغيير لحساب رسوم التوصيل/الشحن
+    // المجاني أدناه، لأنها مرتبطة بعملة اليمني تحديداً وصحيحة كما هي.
+    const merchantAllCurrenciesTotal = Object.values(itemsByCurrency).reduce(
+      (sum, group) => sum + group.totalProductsPrice,
+      0
+    );
+    overallCartTotal += merchantAllCurrenciesTotal;
 
     let actualDeliveryFee = feePerOrder;
     if (mSettings.free_shipping_enabled === true || mSettings.free_shipping_enabled === 'true') {

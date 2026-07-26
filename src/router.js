@@ -4,6 +4,7 @@ import * as orderController from './controllers/orderController.js';
 import * as storeController from './controllers/storeController.js';
 import * as syncController from './controllers/syncController.js';
 import * as aiAssistantController from './controllers/aiAssistantController.js'; // ⭐ إضافة: المساعد الذكي
+import * as whatsappController from './controllers/whatsappController.js'; // ⭐ إضافة: ربط المساعد الذكي بواتساب
 import { ROLES } from './config/constants.js';
 
 // ========================================================
@@ -53,6 +54,12 @@ export const actionRegistry = {
   get_ai_assistant_config: { handler: aiAssistantController.getAiAssistantConfig, roles: [ROLES.MERCHANT] },
   save_ai_assistant_config: { handler: aiAssistantController.saveAiAssistantConfig, roles: [ROLES.MERCHANT] },
   ai_chat: { handler: aiAssistantController.aiChat, roles: [], public: true },
+
+  // 📱 ربط المساعد الذكي بواتساب (تاجر فقط، لوحة التاجر)
+  // ⚠️ ملاحظة: استقبال رسائل واتساب الفعلية (الـ Webhook من Meta) لا يمر
+  // من هنا إطلاقاً - له معالجة خاصة بمسار /webhooks/whatsapp داخل index.js
+  get_whatsapp_config: { handler: whatsappController.getWhatsappConfig, roles: [ROLES.MERCHANT] },
+  save_whatsapp_config: { handler: whatsappController.saveWhatsappConfig, roles: [ROLES.MERCHANT] },
 
   // 🔄 عام / مزامنة
   sync_user: { handler: syncController.syncUser, roles: [], public: true },

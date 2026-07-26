@@ -147,24 +147,14 @@ export async function saveAiAssistantConfig({ env, user, body }) {
 }
 
 // --------------------------------------------------------
-// مسار الدردشة العام الذي يستخدمه عملاء المتجر (بدون تسجيل دخول)
+// 🧠 "دماغ" المساعد الذكي المشترك: يأخذ رسالة عميل (مُعقَّمة مسبقاً) وسجل
+// محادثة، ويرجع رد نصي جاهز. يُستخدم من مصدرين مختلفين:
+//   1) aiChat: ودجت الدردشة على واجهة المتجر (public, JSON body)
+//   2) whatsappController: رسائل واتساب الواردة لكل تاجر (webhook)
+// بهذا الشكل، أي إصلاح مستقبلي (تغيير نموذج، تحسين البحث عن المنتجات..)
+// ينعكس تلقائياً على القناتين معاً بدل تكراره بمكانين.
 // --------------------------------------------------------
-export async function aiChat({ request, env, ctx, body }) {
-  const merchantId = String(body.merchant_id || '');
-  if (!merchantId) throw new HttpError('معرّف المتجر مطلوب', 400);
-
-  // 🚦 تحديد المعدل أولاً وقبل أي استعلام آخر - أرخص عملية ونوقف الهجوم مبكراً
-  const clientIp = request.headers.get('CF-Connecting-IP') || '';
-  await assertRateLimitOk(env, { merchantId, clientIp });
-
-  // 🧼 تعقيم رسالة العميل قبل أي استخدام لها
-  const customerMessage = sanitizeCustomerMessage(body.message);
-  if (!customerMessage) throw new HttpError('الرسالة فارغة', 400);
-
-  // 🧼 تعقيم سجل المحادثة السابق (اختياري) - يسمح للمساعد بربط الرسالة
-  // الحالية بسياق ما قبلها بدل معاملة كل رسالة بمعزل تام عن سابقاتها
-  const conversationHistory = sanitizeConversationHistory(body.history);
-
+export async function generateAiReplyForMerchant({ env, merchantId, customerMessage, conversationHistory }) {
   // --- جلب إعدادات المساعد الخاصة بهذا التاجر (Prepared Statement) ---
   const settingsRow = await env.DB.prepare(
     `SELECT ai_enabled, bot_name, tone, custom_rules FROM merchant_ai_settings WHERE merchant_id = ?`
@@ -317,9 +307,43 @@ export async function aiChat({ request, env, ctx, body }) {
     aiReplyText = 'عذراً، لم أستطع فهم طلبك، هل يمكنك إعادة صياغته؟';
   }
 
-  // 🛡️ دفاع من الدرجة الثانية: حتى لو التزم النموذج بالتعليمات، نهرب أي HTML
-  // من رده قبل إرجاعه، لأن الواجهة الأمامية قد تعرضه بدون تعقيم إضافي.
-  const safeReply = escapeHtml(sanitizePlainText(aiReplyText, 2000));
+  // ⚠️ ملاحظة مهمة: هنا نُرجع نص "عادي" مُعقَّم فقط (بدون escapeHtml)، لأن
+  // هذه الدالة تُستخدم من قناتين مختلفتين: ودجت الويب (يحتاج escapeHtml قبل
+  // العرض بصفحة HTML) وواتساب (نص عادي، لو هربنا HTML هنا بيوصل للعميل حرفياً
+  // "&amp;" بدل "&"). كل مستدعي يتحمل مسؤولية الهروب المناسب لقناته هو.
+  const safeReply = sanitizePlainText(aiReplyText, 2000);
 
-  return { reply: safeReply, bot_name: escapeHtml(settingsRow.bot_name) };
+  return { reply: safeReply, bot_name: settingsRow.bot_name };
+}
+
+// --------------------------------------------------------
+// مسار الدردشة العام الذي يستخدمه عملاء المتجر (بدون تسجيل دخول)
+// --------------------------------------------------------
+export async function aiChat({ request, env, ctx, body }) {
+  const merchantId = String(body.merchant_id || '');
+  if (!merchantId) throw new HttpError('معرّف المتجر مطلوب', 400);
+
+  // 🚦 تحديد المعدل أولاً وقبل أي استعلام آخر - أرخص عملية ونوقف الهجوم مبكراً
+  const clientIp = request.headers.get('CF-Connecting-IP') || '';
+  await assertRateLimitOk(env, { merchantId, clientIp });
+
+  // 🧼 تعقيم رسالة العميل قبل أي استخدام لها
+  const customerMessage = sanitizeCustomerMessage(body.message);
+  if (!customerMessage) throw new HttpError('الرسالة فارغة', 400);
+
+  // 🧼 تعقيم سجل المحادثة السابق (اختياري) - يسمح للمساعد بربط الرسالة
+  // الحالية بسياق ما قبلها بدل معاملة كل رسالة بمعزل تام عن سابقاتها
+  const conversationHistory = sanitizeConversationHistory(body.history);
+
+  const { reply, bot_name } = await generateAiReplyForMerchant({
+    env,
+    merchantId,
+    customerMessage,
+    conversationHistory,
+  });
+
+  // 🛡️ دفاع من الدرجة الثانية خاص بقناة الويب فقط: حتى لو التزم النموذج
+  // بالتعليمات، نهرب أي HTML من رده قبل إرجاعه، لأن ودجت الدردشة يعرضه
+  // داخل صفحة HTML بدون تعقيم إضافي.
+  return { reply: escapeHtml(reply), bot_name: escapeHtml(bot_name) };
 }

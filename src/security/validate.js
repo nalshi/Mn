@@ -37,6 +37,10 @@ const rules = {
   // ⭐ إضافة: المساعد الذكي الخاص بكل تاجر
   save_ai_assistant_config: (body) => requireFields(body, ['bot_name', 'tone']),
   ai_chat: (body) => requireFields(body, ['merchant_id', 'message']),
+  // ⭐ إضافة: ربط واتساب - phone_number_id مطلوب دائماً عند الحفظ (حتى لو
+  // enabled=false)، أما access_token فيُتحقق منه شرطياً داخل الـ controller
+  // نفسه (يُسمح بتركه فارغاً عند التحديث للإبقاء على القيمة المحفوظة سابقاً)
+  save_whatsapp_config: (body) => requireFields(body, ['phone_number_id']),
 };
 
 export function validateAction(action, body, user) {

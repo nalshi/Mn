@@ -3,6 +3,7 @@ import { verifyJWT } from './security/auth.js';
 import { assertAllowed, HttpError } from './security/rbac.js';
 import { validateAction } from './security/validate.js';
 import { buildCorsHeaders, successResponse, errorResponse } from './core/response.js';
+import { handleWhatsappWebhookVerify, handleWhatsappWebhookEvent } from './controllers/whatsappController.js'; // ⭐ إضافة: ربط واتساب
 
 // ========================================================
 // 🚪 نقطة الدخول الرئيسية للـ Worker
@@ -16,6 +17,16 @@ export default {
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
+    }
+
+    // ⭐ إضافة: مسار Webhook خاص بواتساب - حمولات Meta لا تطابق شكل
+    // {action: ...} الداخلي إطلاقاً (لا JWT، ولا حتى JSON بنفس البنية عند
+    // التحقق GET)، لذلك يُعالج بمعزل تام قبل أي منطق آخر بهذا الملف.
+    const url = new URL(request.url);
+    if (url.pathname === '/webhooks/whatsapp') {
+      if (request.method === 'GET') return handleWhatsappWebhookVerify(url, env);
+      if (request.method === 'POST') return handleWhatsappWebhookEvent(request, env, ctx);
+      return new Response('Method Not Allowed', { status: 405 });
     }
 
     if (request.method === 'GET') {
