@@ -138,6 +138,14 @@ async function runCatalogSync(env, username, merchantId, products) {
     await commitMultipleFiles(env, files, `⚡ Auto-sync via Worker [${username}]`);
     console.log(`[Catalog Sync Success] ${username}`);
 
+    // ⏳ تأخير قصير قبل مسح الكاش: كوميت GitHub ينجح فوراً، لكن انتشار
+    // الملفات الفعلية عبر GitHub/jsDelivr يحتاج لحظات. لو مسحنا كاش
+    // Cloudflare فوراً، أول طلب يجي بعد المسح مباشرة يقرأ نسخة قديمة
+    // من GitHub/jsDelivr ويعيد تخزينها بالكاش من جديد - فتوصل النتيجة
+    // "الـ purge اشتغل بس القديم رجع". الحل: نستنى قبل المسح حتى تصير
+    // فرصة كافية للانتشار.
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
     // 🧹 مسح كاش Cloudflare بالكامل (Purge Everything) حتى تنعكس التحديثات
     // فوراً. تم التأكد يدوياً إن مسح روابط محددة ما يشتغل فعلياً على هذا
     // الـ Zone (على الأغلب بسبب Cache Rule بمفتاح كاش مخصص)، فاستخدمنا
