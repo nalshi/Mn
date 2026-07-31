@@ -39,6 +39,10 @@ export const actionRegistry = {
   get_orders: { handler: orderController.getOrders, roles: [ROLES.MERCHANT] },
   cancel_order: { handler: orderController.cancelOrder, roles: [ROLES.MERCHANT] },
   confirm_delivery_code: { handler: orderController.confirmDeliveryCode, roles: [ROLES.MERCHANT] },
+  // ⭐ إضافة: ترحيل get_stats من api.php القديم إلى الـ Worker - يقرأ من
+  // sales_log مباشرة (باسم المنتج المخزَّن وقت البيع) بدل JOIN مع
+  // products، عشان مبيعات المنتجات المحذوفة ما تختفي من الإحصائيات.
+  get_stats: { handler: orderController.getStats, roles: [ROLES.MERCHANT] },
 
   // ⚙️ إعدادات المتجر
   get_merchant_settings: {

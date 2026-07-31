@@ -185,6 +185,32 @@ export async function cancelOrder({ env, ctx, user, body }) {
   return { message: 'تم إلغاء الطلب بنجاح وإعادة المنتجات للمخزون.' };
 }
 
+// 📊 إحصائيات المبيعات (سجل sales_log كاملاً لهذا التاجر) - نقرأ من
+// sales_log مباشرة بدون أي JOIN مع جدول products، حتى تبقى مبيعات
+// المنتجات المحذوفة ظاهرة بالإحصائيات دائماً (الاسم مخزّن كـ snapshot
+// وقت البيع، راجع confirmDeliveryCode بالأسفل).
+export async function getStats({ env, user }) {
+  const rows = await env.DB.prepare(
+    `SELECT id, product_id, product_name, quantity, price_per_item, total_price, currency, created_at
+     FROM sales_log WHERE user_id = ? AND type = 'sale' ORDER BY created_at DESC`
+  )
+    .bind(user.user_id)
+    .all();
+
+  const salesLog = (rows.results || []).map((r) => ({
+    id: r.id,
+    productId: r.product_id,
+    productName: r.product_name || 'منتج محذوف',
+    quantity: r.quantity,
+    price_per_item: r.price_per_item,
+    total_price: r.total_price,
+    currency: r.currency,
+    timestamp: r.created_at,
+  }));
+
+  return { data: { salesLog } };
+}
+
 // ✅ تأكيد التسليم عبر الكود - يسجل المبيعات، يؤرشف الطلب، ويحذف التذكرة النشطة.
 export async function confirmDeliveryCode({ env, ctx, user, body }) {
   const ticketId = body.ticket_id;
@@ -215,11 +241,30 @@ export async function confirmDeliveryCode({ env, ctx, user, body }) {
     const saleId = 'SALE-' + crypto.randomUUID();
     const totalPrice = item.price * item.quantity;
     const costAtSale = (item.cost_price || 0) * item.quantity;
+    // ⭐ إصلاح: نخزّن اسم المنتج (snapshot) هنا وقت البيع بدل الاعتماد على
+    // JOIN مع جدول products عند عرض الإحصائيات لاحقاً. لو التاجر حذف
+    // المنتج بعدين، الإحصائيات القديمة كانت تختفي كلياً لأن الـ JOIN ما
+    // يلقى صف المنتج. الاسم متوفر أصلاً بـ item.product_name من لحظة
+    // إنشاء الطلب (createOrder بـ customerController.js)، فلا داعي لأي
+    // استعلام إضافي على products هنا.
     await env.DB.prepare(
-      `INSERT INTO sales_log (id, user_id, product_id, size_id, quantity, price_per_item, total_price, currency, type, cost_at_sale, order_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sale', ?, ?, ?)`
+      `INSERT INTO sales_log (id, user_id, product_id, product_name, size_id, quantity, price_per_item, total_price, currency, type, cost_at_sale, order_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sale', ?, ?, ?)`
     )
-      .bind(saleId, user.user_id, item.product_id, item.size_id || null, item.quantity, item.price, totalPrice, currency, costAtSale, ticketId, Date.now())
+      .bind(
+        saleId,
+        user.user_id,
+        item.product_id,
+        item.product_name || 'منتج',
+        item.size_id || null,
+        item.quantity,
+        item.price,
+        totalPrice,
+        currency,
+        costAtSale,
+        ticketId,
+        Date.now()
+      )
       .run();
   }
 
