@@ -64,6 +64,36 @@ export async function checkCustomerSession({ env, user }) {
 }
 
 // ========================================================
+// ⭐ إضافة: save_customer_address
+// يحفظ موقع/عنوان العميل (وأحياناً اسمه) بجدول customers مباشرة، بمعزل تام
+// عن إنشاء الطلب (create_order كان الوحيد اللي يكتب على عمود address، وفقط
+// بعد نجاح طلب كامل). بدون هذا الأكشن، الموقع يتخزن بالمتصفح فقط (localStorage)
+// وأي استبدال لاحق لبيانات الجلسة (checkSession بعد تسجيل الدخول، أو تصفير
+// الجلسة عند انتهاء التوكن) كان يمحوه قبل ما يوصل للسيرفر، فيرجع يطلب من
+// العميل تحديد موقعه من جديد رغم إنه حدده فعلاً قبل شوي.
+// ========================================================
+export async function saveCustomerAddress({ env, user, body }) {
+  const address = (body.address || '').toString().trim();
+  if (!address.includes('http')) {
+    throw new HttpError('الرجاء تحديد الموقع على الخريطة بشكل صحيح', 400);
+  }
+
+  const name = (body.name || '').toString().trim();
+
+  if (name && !name.startsWith('عميل')) {
+    await env.DB.prepare(`UPDATE customers SET address = ?, full_name = ? WHERE id = ?`)
+      .bind(address, name, user.user_id)
+      .run();
+  } else {
+    await env.DB.prepare(`UPDATE customers SET address = ? WHERE id = ?`)
+      .bind(address, user.user_id)
+      .run();
+  }
+
+  return { message: 'تم حفظ موقعك بنجاح', address, name: name || undefined };
+}
+
+// ========================================================
 // ⭐ إضافة: verify_cart_live
 // مطابقة لـ api.php case 'verify_cart_live'، لكن تقرأ من جدول products بـ D1
 // فقط (بدون الدعم العكسي لجدول merchant_listings القديم، لأنه غير موجود بـ D1

@@ -21,6 +21,9 @@ export const actionRegistry = {
   create_order: { handler: customerController.createOrder, roles: [ROLES.CUSTOMER] },
   // ⭐ إضافة (2026-07-21): منقولة من api.php لتكتمل هجرة مسار العميل للـ Worker
   check_customer_session: { handler: customerController.checkCustomerSession, roles: [ROLES.CUSTOMER] },
+  // ⭐ إضافة: حفظ موقع/اسم العميل بشكل مستقل عن create_order (يحل مشكلة
+  // ضياع الموقع من الجلسة قبل إتمام أول طلب فعلي)
+  save_customer_address: { handler: customerController.saveCustomerAddress, roles: [ROLES.CUSTOMER] },
   verify_cart_live: { handler: customerController.verifyCartLive, roles: [ROLES.CUSTOMER] },
   get_user_orders: { handler: customerController.getUserOrders, roles: [ROLES.CUSTOMER] },
 
