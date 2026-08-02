@@ -2,6 +2,7 @@ import { commitMultipleFiles } from '../storage/providers/githubProvider.js';
 import { purgeCloudflareCache } from '../storage/providers/cloudflareCacheProvider.js';
 import { waitForVercelDeployment } from '../storage/providers/vercelDeployProvider.js';
 import { enqueueSync } from '../storage/syncQueue.js';
+import { assertSafePathSegment } from '../../core/pathSafety.js';
 
 // ========================================================
 // ⚡ خدمة مزامنة كتالوج المتجر (منتجات + فئات) إلى GitHub
@@ -28,6 +29,11 @@ export async function syncCatalogToStorefront(env, username, merchantId, product
 
 async function runCatalogSync(env, username, merchantId, products) {
   try {
+    // ⭐ تحقق دفاعي إضافي: username يُستخدم حرفياً كجزء من مسارات ملفات
+    // GitHub بالأسفل (stores/${username}/...) - نتأكد أنه لا يحتوي فواصل
+    // مسار قبل أي استخدام، دفاعاً بعمق حتى لو حدث خلل بمصدر هذه القيمة.
+    assertSafePathSegment(username, 'اسم المتجر');
+
     let catRows = [];
     if (merchantId) {
       const catsRes = await env.DB.prepare(

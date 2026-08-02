@@ -4,6 +4,7 @@ import { purgeCloudflareCache, buildStoreFileUrls } from '../storage/providers/c
 // على نفس فرع GitHub (heads/main) المشترك بين كل التجار - لازم يُسلسلا معاً
 // وليس كل واحد بطابوره الخاص، وإلا يبقى نفس احتمال التصادم بينهما.
 import { enqueueSync } from '../storage/syncQueue.js';
+import { assertSafePathSegment } from '../../core/pathSafety.js';
 
 // ========================================================
 // 🏪 خدمة مزامنة معلومات المتجر (info.json) إلى GitHub
@@ -20,11 +21,16 @@ export async function syncStoreInfoToStorefront(env, username, storeInfo) {
 async function runStoreInfoSync(env, username, storeInfo) {
   try {
     if (!username) return;
+    // ⭐ تحقق دفاعي إضافي: نفس السبب الموضّح بـ catalogSyncService.js -
+    // username يدخل مباشرة بمسار ملف GitHub بالأسفل.
+    assertSafePathSegment(username, 'اسم المتجر');
 
     const timestamp = Date.now();
     const infoData = {
       _version: timestamp,
       data: {
+        id: storeInfo.id != null ? String(storeInfo.id) : null,
+        merchant_id: storeInfo.id != null ? String(storeInfo.id) : null,
         store_name: storeInfo.store_name || '',
         store_type: storeInfo.store_type || null,
         phone: storeInfo.phone || null,

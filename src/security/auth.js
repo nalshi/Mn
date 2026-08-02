@@ -1,6 +1,22 @@
 import { base64UrlDecodeToString, base64UrlToBytes } from '../core/encoding.js';
 
 // ========================================================
+// 🛡️ مقارنة بطول/زمن ثابت (Constant-Time Compare)
+// تُستخدم لمقارنة أي سر/مفتاح داخلي (مثل X-Internal-Key) بدل `!==`
+// العادية، حتى لا يكشف فرق التوقيت بين المحاولات الصحيحة والخاطئة أي
+// معلومة عن مدى تطابق الأحرف (Timing Attack). نفس المبدأ المستخدم أصلاً
+// بتحقق توقيع واتساب (whatsappController.js).
+// ========================================================
+export function timingSafeEqual(a, b) {
+  const strA = String(a || '');
+  const strB = String(b || '');
+  if (strA.length !== strB.length) return false;
+  let diff = 0;
+  for (let i = 0; i < strA.length; i++) diff |= strA.charCodeAt(i) ^ strB.charCodeAt(i);
+  return diff === 0;
+}
+
+// ========================================================
 // 🛡️ التحقق من JWT (Web Crypto API)
 // تحسينات أمنية مقارنة بالنسخة الأصلية:
 //  1) رفض أي alg غير HS256 صراحة (منع هجوم alg=none / تبديل الخوارزمية)

@@ -80,6 +80,7 @@ export async function saveMerchantSettings({ env, ctx, user, body }) {
   // 🐙 رفع معلومات المتجر (info.json) إلى GitHub في الخلفية لتحديث واجهة المتجر العامة
   ctx.waitUntil(
     syncStoreInfoToStorefront(env, user.username, {
+      id: user.user_id,
       store_name: storeName,
       store_type: finalStoreType,
       phone: finalSettings.phone,

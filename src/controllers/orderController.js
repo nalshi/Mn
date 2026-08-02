@@ -6,6 +6,9 @@ import {
 } from '../services/notifications/notificationService.js';
 import { HttpError } from '../security/rbac.js';
 import { syncCatalogToStorefront } from '../services/catalog/catalogSyncService.js';
+import { ORDER_STATUSES } from '../config/constants.js';
+
+const VALID_ORDER_STATUSES = Object.values(ORDER_STATUSES);
 
 // ========================================================
 // 📦 تحكم طلبات التاجر - دورة حياة الطلب كاملة على D1
@@ -93,6 +96,12 @@ export async function getMerchantOrders({ env, user }) {
 // و merchant_update_order_status القديمتين معاً بأكشن واحد موحّد.
 export async function updateOrderStatus({ env, ctx, user, body }) {
   if (!body.ticket_id || !body.status) throw new HttpError('ticket_id و status مطلوبان', 400);
+  // ⭐ إصلاح: كانت أي قيمة نصية تُقبل بدون تحقق وتُكتب مباشرة بعمود status،
+  // رغم أن باقي النظام (ACTIVE_ORDER_STATUSES، منطق الأرشفة، تطبيقا الزبون
+  // والمندوب) يفترض أن القيمة دائماً إحدى حالات ORDER_STATUSES المعروفة.
+  if (!VALID_ORDER_STATUSES.includes(body.status)) {
+    throw new HttpError('قيمة status غير معروفة.', 400);
+  }
 
   const result = await env.DB.prepare(`UPDATE live_tickets SET status = ? WHERE ticket_id = ? AND merchant_id = ?`)
     .bind(body.status, body.ticket_id, user.user_id)

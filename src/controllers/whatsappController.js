@@ -150,6 +150,15 @@ export async function saveWhatsappConfig({ env, user, body }) {
   if (enabled && !accessToken) {
     throw new HttpError('access_token مطلوب لتفعيل الربط', 400);
   }
+  // ⭐ إصلاح أمني: بدون app_secret، يتعذّر التحقق من توقيع Meta على أي
+  // Webhook وارد (راجع verifyMetaSignature)، مما يسمح لأي طرف يعرف
+  // phone_number_id (ليس سرّياً) بإرسال أحداث واتساب مزوّرة باسم هذا
+  // التاجر - فتُستهلك حصة Gemini الخاصة به، بل وتُرسل ردود فعلية من رقم
+  // واتساب حسابه الحقيقي (access_token صالح) لأي جهة يختارها المهاجم.
+  // نفس الإلزام المطبّق أصلاً على access_token.
+  if (enabled && !appSecret) {
+    throw new HttpError('app_secret مطلوب لتفعيل الربط (لحماية الرابط من الأحداث المزوّرة)', 400);
+  }
 
   try {
     await env.DB.prepare(
@@ -212,7 +221,13 @@ export async function handleWhatsappWebhookVerify(url, env) {
 }
 
 async function verifyMetaSignature(rawBody, signatureHeader, appSecret) {
-  if (!appSecret) return true; // التوقيع اختياري (لو التاجر ما دخّل app_secret بعد)
+  // ⭐ إصلاح أمني: كانت هذي الدالة "تسمح" (return true) لو ما كان فيه
+  // app_secret، على اعتبار أن التوقيع "اختياري" حتى يُعدّه التاجر - لكن هذا
+  // يعني عملياً أن أي حدث Webhook غير موقّع يُقبل كأنه توقيعه صحيح. الآن
+  // saveWhatsappConfig تفرض app_secret إجبارياً عند التفعيل، فهذا المسار
+  // (بلا app_secret) لا يجب أن يحدث لتاجر مفعّل أصلاً - ونرفض بأمان
+  // (fail closed) بدل القبول لو حدث بأي شكل (بيانات قديمة قبل هذا الإصلاح مثلاً).
+  if (!appSecret) return false;
   if (!signatureHeader || !signatureHeader.startsWith('sha256=')) return false;
 
   const key = await crypto.subtle.importKey(
@@ -289,7 +304,10 @@ export async function handleWhatsappWebhookEvent(request, env, ctx) {
         .bind(phoneNumberId)
         .first();
 
-      if (!settingsRow || !settingsRow.enabled || !settingsRow.access_token) continue;
+      // دفاع إضافي (defense in depth): حتى لو وُجد صف قديم مفعّل بلا
+      // app_secret (من قبل هذا الإصلاح)، نرفض معالجته بدل الاعتماد فقط على
+      // verifyMetaSignature - فشل مغلق تماماً بغياب السرّ.
+      if (!settingsRow || !settingsRow.enabled || !settingsRow.access_token || !settingsRow.app_secret) continue;
 
       // 🔐 تحقق من توقيع Meta (لو التاجر مفعّل app_secret بإعداداته)
       const signatureOk = await verifyMetaSignature(

@@ -61,8 +61,20 @@ export default {
       const result = await route.handler({ request, env, ctx, user, body, uploadedImageFile });
       return successResponse(result || {}, corsHeaders);
     } catch (error) {
-      const status = error instanceof HttpError ? error.status : 500;
-      return errorResponse(error.message || 'حدث خطأ في السيرفر', corsHeaders, status);
+      // ⭐ إصلاح أمني (تسريب معلومات داخلية): كان أي خطأ غير متوقع (غير
+      // HttpError - أخطاء قاعدة بيانات، أخطاء برمجية، JSON.parse فاشل..)
+      // يُرسل error.message الخام مباشرة للعميل، وهو بالضبط ما يحاول هذا
+      // المشروع تفاديه بمواضع أخرى (راجع التعليق بمعالجة أخطاء Gemini في
+      // aiAssistantController.js: "لا يُرسل للعميل..حفاظاً على عدم تسريب
+      // تفاصيل داخلية للطرف العام"). رسائل HttpError مقصودة وآمنة للعرض
+      // (تُستخدم كواجهة أخطاء رئيسية بكل المشروع) فتبقى كما هي؛ أي خطأ آخر
+      // غير متوقع يُسجَّل بالسيرفر (لم يكن يُسجَّل إطلاقاً سابقاً - فجوة
+      // تشغيلية أيضاً) ويُرجع للعميل رسالة عامة فقط.
+      if (error instanceof HttpError) {
+        return errorResponse(error.message, corsHeaders, error.status);
+      }
+      console.error('Unhandled Worker error:', error);
+      return errorResponse('حدث خطأ في السيرفر، يرجى المحاولة لاحقاً.', corsHeaders, 500);
     }
   },
 };

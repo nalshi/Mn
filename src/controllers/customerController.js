@@ -3,6 +3,7 @@ import { syncCatalogToStorefront } from '../services/catalog/catalogSyncService.
 import { syncOrderTracking } from '../services/realtime/realtimeSyncService.js';
 import { sendFcmNotification } from '../services/notifications/providers/fcmProvider.js';
 import { extractCoordsFromUrl, calculateDistance, calculateDeliveryFee } from '../services/geo/geoUtils.js';
+import { syncNewOrderToLegacyApi } from '../services/legacySync/tidbSyncService.js';
 import {
   ALLOWED_DELIVERY_CENTER_LAT,
   ALLOWED_DELIVERY_CENTER_LNG,
@@ -61,36 +62,6 @@ export async function checkCustomerSession({ env, user }) {
 
   const needsProfileUpdate = String(row.full_name || '').startsWith('عميل');
   return { loggedIn: true, customer: row, needs_profile_update: needsProfileUpdate };
-}
-
-// ========================================================
-// ⭐ إضافة: save_customer_address
-// يحفظ موقع/عنوان العميل (وأحياناً اسمه) بجدول customers مباشرة، بمعزل تام
-// عن إنشاء الطلب (create_order كان الوحيد اللي يكتب على عمود address، وفقط
-// بعد نجاح طلب كامل). بدون هذا الأكشن، الموقع يتخزن بالمتصفح فقط (localStorage)
-// وأي استبدال لاحق لبيانات الجلسة (checkSession بعد تسجيل الدخول، أو تصفير
-// الجلسة عند انتهاء التوكن) كان يمحوه قبل ما يوصل للسيرفر، فيرجع يطلب من
-// العميل تحديد موقعه من جديد رغم إنه حدده فعلاً قبل شوي.
-// ========================================================
-export async function saveCustomerAddress({ env, user, body }) {
-  const address = (body.address || '').toString().trim();
-  if (!address.includes('http')) {
-    throw new HttpError('الرجاء تحديد الموقع على الخريطة بشكل صحيح', 400);
-  }
-
-  const name = (body.name || '').toString().trim();
-
-  if (name && !name.startsWith('عميل')) {
-    await env.DB.prepare(`UPDATE customers SET address = ?, full_name = ? WHERE id = ?`)
-      .bind(address, name, user.user_id)
-      .run();
-  } else {
-    await env.DB.prepare(`UPDATE customers SET address = ? WHERE id = ?`)
-      .bind(address, user.user_id)
-      .run();
-  }
-
-  return { message: 'تم حفظ موقعك بنجاح', address, name: name || undefined };
 }
 
 // ========================================================
@@ -260,11 +231,19 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
 
   const finalName = (cData.name || '').toString().trim() || (custDb && custDb.full_name) || '';
 
-  let finalAddress = `رابط الموقع: ${customerGpsLink}`;
-  if (detailsPart) {
-    finalAddress += ` | التفاصيل: ${detailsPart}`;
-  } else if (!customerGpsLink && custDb && custDb.address) {
+  let finalAddress;
+  if (customerGpsLink) {
+    finalAddress = `رابط الموقع: ${customerGpsLink}`;
+    if (detailsPart) finalAddress += ` | التفاصيل: ${detailsPart}`;
+  } else if (custDb && custDb.address) {
+    // ⭐ إصلاح (2026-08-01): الرجوع للعنوان المحفوظ سابقاً يعتمد فقط على
+    // عدم وجود رابط GPS بالطلب الحالي، بدون أي علاقة بوجود detailsPart.
+    // قبل التعديل: لو detailsPart غير فاضي لكن customerGpsLink فاضي (فشل
+    // استخلاص الرابط من الواجهة)، كان يتجاهل العنوان المحفوظ ويرفض الطلب
+    // برسالة "يرجى تحديد الموقع" حتى لو المستخدم عنده عنوان صحيح محفوظ.
     finalAddress = custDb.address;
+  } else {
+    finalAddress = '';
   }
 
   if (!finalName || finalName.startsWith('عميل')) {
@@ -569,7 +548,7 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
     // قد يُدمَج طلب بعملة USD مع تذكرة سابقة بعملة YER لنفس التاجر فيختلط
     // الحساب. لذلك نجلب كل التذاكر المعلّقة لهذا التاجر ونفلتر بالعملة.
     const candidateTickets = await env.DB.prepare(
-      `SELECT ticket_id, ticket_data, status, delivery_code FROM live_tickets
+      `SELECT ticket_id, order_group_id, ticket_data, status, delivery_code FROM live_tickets
        WHERE customer_id = ? AND merchant_id = ?
        AND status IN ('pending_merchant_approval', 'pending_delivery_acceptance')
        AND delivery_agent_id IS NULL`
@@ -631,6 +610,23 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
         .run();
       isOrderMerged = true;
 
+      // ⭐ إصلاح: syncNewOrderToLegacyApi كانت معرّفة بالكامل بـ
+      // tidbSyncService.js لكن غير مستدعاة من أي مكان بالمشروع، فكانت كل
+      // الطلبات الجديدة/المدموجة تبقى غير مرئية لنظام api.php القديم
+      // (وبالتالي لتطبيقي المندوب والزبون القديمين اللذين يقرآن من TiDB
+      // مباشرة). best-effort بالخلفية، لا تُعطّل رد العميل.
+      ctx.waitUntil(
+        syncNewOrderToLegacyApi(env, {
+          ticket_id: ticketId,
+          order_group_id: existingTicket.order_group_id,
+          merchant_id: merchantId,
+          customer_id: customerId,
+          status: existingTicket.status,
+          delivery_code: existingTicket.delivery_code,
+          ticket_data: updatedTicketDataStr,
+        })
+      );
+
       createdTickets.push({
         ticket_id: ticketId,
         merchant_id: merchantId,
@@ -639,7 +635,11 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
         original_items_to_deduct: subOrder.items,
       });
     } else {
-      const deliveryCode = Math.floor(1000 + Math.random() * 9000);
+      // ⭐ إصلاح أمني: Math.random() ليس مولّداً عشوائياً آمناً تشفيرياً
+      // (قابل للتنبؤ نظرياً)، وكود التسليم هنا يُستخدم كتحقق أمني بسيط عند
+      // استلام الطلب فعلياً. نستخدم crypto.getRandomValues المتاح أصلاً
+      // بهذي البيئة (Web Crypto API) بدلاً منه.
+      const deliveryCode = 1000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 9000);
       const ticketId = 'TCK-' + crypto.randomUUID();
       const finalStatus = 'pending_merchant_approval';
 
@@ -675,6 +675,18 @@ async function processOrderCreation({ env, ctx, user, body, customerId }) {
       )
         .bind(ticketId, newOrderGroupId, merchantId, customerId, finalStatus, deliveryCode, ticketDataStr)
         .run();
+
+      ctx.waitUntil(
+        syncNewOrderToLegacyApi(env, {
+          ticket_id: ticketId,
+          order_group_id: newOrderGroupId,
+          merchant_id: merchantId,
+          customer_id: customerId,
+          status: finalStatus,
+          delivery_code: deliveryCode,
+          ticket_data: ticketDataStr,
+        })
+      );
 
       createdTickets.push({
         ticket_id: ticketId,

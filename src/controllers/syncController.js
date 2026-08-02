@@ -3,6 +3,17 @@ import { getCategoriesTree } from '../services/categories/categoryService.js';
 import { ROLES } from '../config/constants.js';
 import { syncStoreInfoToStorefront } from '../services/store/storeInfoSyncService.js';
 import { syncCatalogToStorefront } from '../services/catalog/catalogSyncService.js';
+import { timingSafeEqual } from '../security/auth.js';
+
+// ⭐ إصلاح أمني: التحقق من X-Internal-Key كان بمقارنة `!==` العادية
+// (غير ثابتة الزمن) - نستخدم نفس المقارنة الآمنة المستخدمة أصلاً بتوقيع
+// واتساب، مركزية هنا لتُطبّق على الثلاث نقاط التي تعتمد على هذا المفتاح.
+function assertInternalKey(request, env) {
+  const internalKey = request.headers.get('X-Internal-Key') || '';
+  if (!env.INTERNAL_SYNC_KEY || !timingSafeEqual(internalKey, env.INTERNAL_SYNC_KEY)) {
+    throw new HttpError('غير مصرح', 401);
+  }
+}
 
 // ========================================================
 // 🔄 تحكم المزامنة والمسارات العامة
@@ -10,10 +21,7 @@ import { syncCatalogToStorefront } from '../services/catalog/catalogSyncService.
 
 // محمي بمفتاح داخلي منفصل عن توكن الجلسات (وليس بـ JWT) - يُستدعى من api.php
 export async function syncUser({ env, ctx, body, request }) {
-  const internalKey = request.headers.get('X-Internal-Key') || '';
-  if (!env.INTERNAL_SYNC_KEY || internalKey !== env.INTERNAL_SYNC_KEY) {
-    throw new HttpError('غير مصرح', 401);
-  }
+  assertInternalKey(request, env);
 
   // ⭐ إصلاح: عند فتح متجر جديد (تسجيل تاجر جديد بـ api.php)، كان هذا
   // المسار يكتفي بحفظ صف المستخدم بـ D1 فقط، دون رفع أي ملفات (info.json /
@@ -59,6 +67,7 @@ export async function syncUser({ env, ctx, body, request }) {
     }
     ctx.waitUntil(
       syncStoreInfoToStorefront(env, body.username, {
+        id: body.id,
         store_name: body.store_name || body.username,
         store_type: body.store_type || null,
         phone: body.phone || null,
@@ -77,10 +86,7 @@ export async function syncUser({ env, ctx, body, request }) {
 // syncUser تماماً (نفس آلية الحماية بـ X-Internal-Key). تُستدعى من
 // sync_customer_to_worker() في api.php بعد كل تسجيل دخول ناجح للعميل.
 export async function syncCustomer({ env, body, request }) {
-  const internalKey = request.headers.get('X-Internal-Key') || '';
-  if (!env.INTERNAL_SYNC_KEY || internalKey !== env.INTERNAL_SYNC_KEY) {
-    throw new HttpError('غير مصرح', 401);
-  }
+  assertInternalKey(request, env);
 
   // ⭐ نحافظ على fcm_token الحالي للعميل بالـ D1 (COALESCE) عند كل مزامنة،
   // بنفس نمط syncUser تماماً، حتى لا تُفقد الإشعارات إذا لم يرسل api.php
@@ -115,10 +121,7 @@ export async function syncCustomer({ env, body, request }) {
 // "تذكرة قائمة" قابلة للدمج مع طلب جديد لاحق لنفس العميل/التاجر — وهو ما كان يُعيد
 // إحياء طلبات مُلغاة/مكتملة بالخطأ في MySQL بعد كل طلب جديد.
 export async function syncTicketStatus({ env, body, request }) {
-  const internalKey = request.headers.get('X-Internal-Key') || '';
-  if (!env.INTERNAL_SYNC_KEY || internalKey !== env.INTERNAL_SYNC_KEY) {
-    throw new HttpError('غير مصرح', 401);
-  }
+  assertInternalKey(request, env);
   if (!body.ticket_id || !body.status) {
     throw new HttpError('ticket_id و status مطلوبان', 400);
   }
@@ -172,8 +175,16 @@ export async function getPublicProducts({ env, user, body }) {
     .first();
   if (!merchantRow) throw new HttpError('المتجر غير موجود', 404);
 
+  // ⭐ إصلاح أمني (تسريب بيانات حسّاسة): كان الاستعلام SELECT * على مسار
+  // عام (public: true) بدون أي تسجيل دخول، فيرجع أيضاً أعمدة داخلية بحتة
+  // مثل cost_price (تكلفة الشراء) لأي زائر - بيانات لا يجب أن يراها حتى
+  // منافسو التاجر. نفس المبدأ المتّبع أصلاً بباقي القراءات العامة بالمشروع
+  // (راجع verifyCartLive وbuildProductsBlock بـ catalogSyncService.js
+  // اللتين تستثنيان cost_price عمداً) - هنا نحدد الأعمدة العامة الآمنة فقط.
   const publicProducts = await env.DB.prepare(
-    `SELECT * FROM products WHERE merchant_id = ? AND is_available = 1 ORDER BY updated_at DESC`
+    `SELECT id, merchant_id, name, description, price, discount, image, quantity, quantity_type,
+            currency, category_id, options, features, is_available, updated_at
+     FROM products WHERE merchant_id = ? AND is_available = 1 ORDER BY updated_at DESC`
   )
     .bind(merchantRow.id)
     .all();

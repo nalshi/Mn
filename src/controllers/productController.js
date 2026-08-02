@@ -8,8 +8,24 @@ import { ACTIVE_ORDER_STATUSES } from '../config/constants.js';
 // 🏪 تحكم المنتجات (تاجر فقط)
 // ========================================================
 
+// ⭐ إصلاح أمني (ثغرة IDOR): معرّف المنتج قد يأتي من العميل (تعديل منتج
+// موجود)، ويُستخدم لاحقاً كجزء من مسار ملف الصورة على GitHub (راجع
+// imageService.js). بدون قيد صارم على شكله، كان بالإمكان تمرير معرّف يحتوي
+// "/" أو ".." لتحويل مسار رفع الصورة لمكان آخر تماماً بمستودع GitHub
+// (اجتياز مسار). نقصر الشكل المقبول على نفس صيغة المعرّفات التي يولّدها
+// النظام نفسه (حروف/أرقام/شرطات فقط) لإغلاق هذا المسار نهائياً.
+const PRODUCT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
 export async function saveProduct({ env, ctx, user, body, uploadedImageFile }) {
-  const pid = body.id || 'PROD-' + crypto.randomUUID();
+  let pid;
+  if (body.id) {
+    if (!PRODUCT_ID_PATTERN.test(String(body.id))) {
+      throw new HttpError('معرّف المنتج غير صالح.', 400);
+    }
+    pid = String(body.id);
+  } else {
+    pid = 'PROD-' + crypto.randomUUID();
+  }
 
   let finalCategoryId = null;
   if (body.category_id === 'NEW_CHAIN') {
@@ -24,14 +40,26 @@ export async function saveProduct({ env, ctx, user, body, uploadedImageFile }) {
     imageUrl = await uploadProductImage(env, user.username, pid, uploadedImageFile);
   }
 
-  await env.DB.prepare(
+  // ⭐ إصلاح أمني (ثغرة IDOR/Broken Access Control): كانت جملة الـ UPSERT
+  // تحلّ التعارض بالاعتماد فقط على "id" بدون أي تحقق من ملكية الصف
+  // الموجود مسبقاً. لو أرسل تاجر A معرّف منتج يخصّ تاجر B فعلياً (معرّفات
+  // المنتجات ليست سرّية - تظهر بواجهة المتجر العامة وبالسلة)، كانت جملة
+  // ON CONFLICT تُنفّذ DO UPDATE على صف B مباشرة (تغيّر اسمه/سعره/صورته/
+  // توفره) رغم أن merchant_id لصف B يبقى كما هو (لأنه غير موجود أصلاً
+  // بقائمة SET). الحل: نضيف شرط WHERE على نفس جملة DO UPDATE يقصر التحديث
+  // فقط على الحالة التي يتطابق فيها merchant_id للصف الموجود مسبقاً مع
+  // merchant_id الذي نحاول الإدراج به (أي التاجر الحالي نفسه) - فتصير
+  // محاولة "استيلاء" على منتج تاجر آخر بلا أي تأثير على الإطلاق (0 صفوف
+  // متأثرة) بدل تنفيذها بصمت.
+  const result = await env.DB.prepare(
     `INSERT INTO products (id, merchant_id, name, description, price, cost_price, discount, image, quantity, quantity_type, currency, category_id, options, is_available, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
      name=excluded.name, description=excluded.description, price=excluded.price, cost_price=excluded.cost_price,
      discount=excluded.discount, image=excluded.image, quantity=excluded.quantity, quantity_type=excluded.quantity_type,
      currency=excluded.currency, category_id=excluded.category_id, options=excluded.options,
-     is_available=excluded.is_available, updated_at=excluded.updated_at`
+     is_available=excluded.is_available, updated_at=excluded.updated_at
+     WHERE products.merchant_id = excluded.merchant_id`
   )
     .bind(
       pid,
@@ -51,6 +79,10 @@ export async function saveProduct({ env, ctx, user, body, uploadedImageFile }) {
       Date.now()
     )
     .run();
+
+  if (!result.meta || result.meta.changes === 0) {
+    throw new HttpError('لا يمكنك تعديل منتج لا يخصك.', 403);
+  }
 
   const allProducts = await env.DB.prepare(
     `SELECT * FROM products WHERE merchant_id = ? AND is_available = 1`
