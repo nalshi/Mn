@@ -4,6 +4,7 @@ import { syncOrderTracking } from '../services/realtime/realtimeSyncService.js';
 import { sendFcmNotification } from '../services/notifications/providers/fcmProvider.js';
 import { extractCoordsFromUrl, calculateDistance, calculateDeliveryFee } from '../services/geo/geoUtils.js';
 import { syncNewOrderToLegacyApi } from '../services/legacySync/tidbSyncService.js';
+import { assertOrderRateLimitOk } from '../services/orders/orderRateLimiter.js';
 import {
   ALLOWED_DELIVERY_CENTER_LAT,
   ALLOWED_DELIVERY_CENTER_LNG,
@@ -21,13 +22,22 @@ import {
 // ========================================================
 
 export async function addToCart({ env, user, body }) {
+  // ⭐ إصلاح: quantity كانت تُحفظ كما وصلت من العميل بدون أي تحقق - قيمة
+  // سالبة أو صفرية أو نصية غير رقمية كانت تُكتب مباشرة بجدول user_cart (قد
+  // تُعرض لاحقاً بواجهة السلة بشكل خاطئ/مربك). create_order لا يثق بهذا
+  // الجدول أصلاً (يعيد التحقق من الكمية بالكامل من body.local_cart)، لكن
+  // عدم التحقق عند الكتابة يبقى خطأ بحد ذاته. نفس حد MAX_QTY_PER_ITEM
+  // المستخدم لاحقاً بإنشاء الطلب، حفاظاً على قيمة واحدة متسقة.
+  const qty = parseInt(body.quantity, 10);
+  const safeQty = Number.isFinite(qty) && qty > 0 ? Math.min(qty, MAX_QTY_PER_ITEM) : 1;
+
   await env.DB.prepare(
     `INSERT INTO user_cart (customer_id, product_id, merchant_id, quantity, size_id)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(customer_id, product_id, size_id)
      DO UPDATE SET quantity = quantity + excluded.quantity`
   )
-    .bind(user.user_id, body.product_id, body.merchant_id, body.quantity || 1, body.size_id || null)
+    .bind(user.user_id, body.product_id, body.merchant_id, safeQty, body.size_id || null)
     .run();
 
   return { message: 'تمت الإضافة للسلة' };
@@ -157,6 +167,11 @@ export async function verifyCartLive({ env, body }) {
 // ========================================================
 export async function createOrder({ env, ctx, user, body }) {
   const customerId = user.user_id;
+
+  // ⭐ إصلاح: لا يوجد حد لمعدل استدعاء create_order لكل عميل (راجع تعليق
+  // orderRateLimiter.js). نتحقق أولاً، قبل أي عمل آخر (حتى قبل idempotency)
+  // حتى يكون الرفض رخيصاً وسريعاً بدون أي كتابة إضافية على D1.
+  await assertOrderRateLimitOk(env, customerId);
 
   // 1) منع التكرار (Idempotency)
   const idempotencyKey = (body.idempotency_key || '').toString().trim();

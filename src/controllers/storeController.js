@@ -34,8 +34,12 @@ export async function getMerchantSettings({ env, user }) {
 export async function saveMerchantSettings({ env, ctx, user, body }) {
   const storeName = (body.storeName || '').trim();
   const storeType = body.storeType || null;
-  const newSettings =
-    typeof body.settings === 'string' ? JSON.parse(body.settings || '{}') : body.settings || {};
+  let newSettings;
+  try {
+    newSettings = typeof body.settings === 'string' ? JSON.parse(body.settings || '{}') : body.settings || {};
+  } catch (e) {
+    throw new HttpError('صيغة الإعدادات (settings) غير صالحة.', 400);
+  }
   if (!storeName) throw new HttpError('اسم المتجر مطلوب ولا يمكن أن يكون فارغاً.', 400);
 
   const current = await env.DB.prepare(`SELECT settings, store_type, phone FROM users WHERE id = ?`)

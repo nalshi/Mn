@@ -166,9 +166,35 @@ export async function getCategoriesTreeHandler({ env, user }) {
   return { data };
 }
 
-export async function getPublicProducts({ env, user, body }) {
+export async function getPublicProducts({ env, ctx, request, user, body }) {
   const storeUsername = body.username || user?.username;
   if (!storeUsername) throw new HttpError('اسم المتجر مطلوب', 400);
+
+  // ⭐ إضافة (حماية من الطلبات المتكررة + استجابة فورية + توفير عبء على
+  // D1): هذا المسار عام بدون تسجيل دخول ويُستدعى بشكل متكرر جداً - كل
+  // زائر لصفحة متجر يستدعيه. لا يعتمد الرد على هوية المستدعي إطلاقاً
+  // (بيانات عامة بحتة لمتجر محدد)، فهو مرشّح مثالي للتخزين المؤقت. نستخدم
+  // Cache API الخاص بـ Cloudflare Workers (caches.default، متاح تلقائياً
+  // بهذه البيئة) لتخزين النتيجة 30 ثانية فقط لكل متجر - يخفّض قراءات D1
+  // المتكررة لنفس المتجر خلال فترة قصيرة ويجعل الرد فورياً من الحافة
+  // (Edge) بدون أي رحلة لقاعدة البيانات، مع بقاء احتمال التقديم بيانات
+  // قديمة محدوداً بـ 30 ثانية كحد أقصى. فشل آمن (fail-open): أي عطل
+  // بالتخزين المؤقت نفسه لا يمنع القراءة المباشرة من D1 كما كانت دائماً.
+  const cacheApi = typeof caches !== 'undefined' ? caches.default : null;
+  const cacheKey = cacheApi
+    ? new Request(`https://cache.internal/get_public_products?u=${encodeURIComponent(storeUsername)}`, {
+        method: 'GET',
+      })
+    : null;
+
+  if (cacheApi && cacheKey) {
+    try {
+      const cachedResponse = await cacheApi.match(cacheKey);
+      if (cachedResponse) return await cachedResponse.json();
+    } catch (e) {
+      console.error('getPublicProducts cache read error (falling back to DB):', e);
+    }
+  }
 
   const merchantRow = await env.DB.prepare(`SELECT id FROM users WHERE username = ? AND role = 'merchant'`)
     .bind(storeUsername)
@@ -197,5 +223,25 @@ export async function getPublicProducts({ env, user, body }) {
     }
     return p;
   });
-  return { data };
+
+  const result = { data };
+
+  if (cacheApi && cacheKey && ctx) {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          await cacheApi.put(
+            cacheKey,
+            new Response(JSON.stringify(result), {
+              headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=30' },
+            })
+          );
+        } catch (e) {
+          console.error('getPublicProducts cache write error (non-fatal):', e);
+        }
+      })()
+    );
+  }
+
+  return result;
 }

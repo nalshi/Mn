@@ -4,6 +4,23 @@
 
 export async function resolveCategoryChain(env, merchantId, chainNames, anchorId) {
   let parentId = anchorId ? parseInt(anchorId) : 0;
+
+  // ⭐ إصلاح: anchorId يأتي من العميل (body.category_anchor_id) بدون أي
+  // تحقق من ملكيته. لو أُرسل معرّف فئة تخص تاجراً آخر، كانت تُنشأ فئة جديدة
+  // بـ parent_id يشير لصف لا يملكه هذا التاجر - لا يكشف ولا يعدّل بيانات
+  // التاجر الآخر (getCategoriesTree يفلتر حسب الملكية أصلاً)، لكنها فئة
+  // "يتيمة" فعلياً بشجرة هذا التاجر (تلوّث بيانات). نتحقق أن anchorId يخص
+  // هذا التاجر فعلاً (أو فئة عامة مشتركة user_id IS NULL) قبل استخدامه،
+  // وإلا نبدأ من الجذر بدل تجاهل المشكلة بصمت.
+  if (parentId) {
+    const anchorRow = await env.DB.prepare(
+      `SELECT id FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)`
+    )
+      .bind(parentId, merchantId)
+      .first();
+    if (!anchorRow) parentId = 0;
+  }
+
   let finalId = parentId;
 
   for (const name of chainNames) {

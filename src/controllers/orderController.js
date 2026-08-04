@@ -22,11 +22,16 @@ export async function getOrders({ env, user, body }) {
     return getMerchantOrders({ env, user });
   }
 
+  // ⭐ نفس إصلاح getStats: orders_archive تكبر بلا حد مع الوقت (كل طلب
+  // مكتمل يُضاف إليها للأبد) - نفس المخاطر تماماً (rows_read + وقت معالج)
+  // بدون حد أقصى. حد افتراضي سخي (200 أحدث طلب) يغطي أي تصفّح واقعي.
+  const limit = Math.min(Math.max(parseInt(body?.limit, 10) || 200, 1), 200);
+
   const archives = await env.DB.prepare(
     `SELECT ticket_id as id, final_status as status, archived_at as created_at, archived_data, total_amount
-     FROM orders_archive WHERE merchant_id = ? ORDER BY archived_at DESC`
+     FROM orders_archive WHERE merchant_id = ? ORDER BY archived_at DESC LIMIT ?`
   )
-    .bind(user.user_id)
+    .bind(user.user_id, limit)
     .all();
 
   const orders = (archives.results || []).map((arc) => {
@@ -52,9 +57,12 @@ export async function getOrders({ env, user, body }) {
 
 // 📦 الطلبات النشطة (live_tickets) فقط
 export async function getMerchantOrders({ env, user }) {
+  // ⭐ تحقق دفاعي: هذا الجدول محدود طبيعياً (الطلبات المكتملة تُنقل فوراً
+  // لـ orders_archive وتُحذف من هنا)، لكن نضيف حداً أعلى احتياطياً - أي
+  // خلل مستقبلي بمنطق الأرشفة، أو تراكم غير متوقع، لن يكسر لوحة التاجر.
   const tickets = await env.DB.prepare(
     `SELECT ticket_id as id, order_group_id, status, created_at, delivery_code, delivery_agent_id, ticket_data
-     FROM live_tickets WHERE merchant_id = ? ORDER BY created_at DESC`
+     FROM live_tickets WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 200`
   )
     .bind(user.user_id)
     .all();
@@ -140,6 +148,22 @@ export async function cancelOrder({ env, ctx, user, body }) {
 
   if (!ticket) throw new HttpError('الطلب غير موجود أو تم التعامل معه مسبقاً.', 404);
 
+  // ⭐ إصلاح أمني (حماية من الطلبات المتكررة/المتزامنة): كان الحذف يحدث
+  // بنهاية الدالة فقط، بعد حلقة كاملة تُعيد كل عنصر للمخزون. لو وصل طلبان
+  // متزامنان (نقرة مزدوجة، إعادة محاولة الشبكة..) لنفس التذكرة، كان
+  // الاثنان يجتازان الفحص أعلاه (لم تُحذف التذكرة بعد) وتُعاد كل الكمية
+  // للمخزون مرتين. الحل: "نطالب" بالتذكرة أولاً بحذف شرطي ذري - فقط أول
+  // طلب ينجح، والثاني يفشل بوضوح بدل تكرار إعادة المخزون بصمت.
+  const claim = await env.DB.prepare(
+    `DELETE FROM live_tickets WHERE ticket_id = ? AND merchant_id = ?`
+  )
+    .bind(body.ticket_id, user.user_id)
+    .run();
+
+  if (!claim.meta || claim.meta.changes === 0) {
+    throw new HttpError('تم التعامل مع هذا الطلب بالفعل (ربما بطلب سابق متزامن).', 409);
+  }
+
   let ticketData = {};
   try {
     ticketData = JSON.parse(ticket.ticket_data || '{}');
@@ -181,13 +205,24 @@ export async function cancelOrder({ env, ctx, user, body }) {
     }
   }
 
-  await env.DB.prepare(`DELETE FROM live_tickets WHERE ticket_id = ?`).bind(body.ticket_id).run();
-
   ctx.waitUntil(syncOrderTracking(env, body.ticket_id, 'cancelled', user.username));
   // ⭐ إلغاء الطلب هو أيضاً "تغيير حالة من قبل التاجر"، فيجب أن يصل إشعار للعميل.
   ctx.waitUntil(notifyOrderStatusUpdate(env, ticket.customer_id, 'cancelled', body.ticket_id));
   if (inventoryChanged) {
-    const allProducts = await env.DB.prepare(`SELECT * FROM products WHERE merchant_id = ?`).bind(user.user_id).all();
+    // ⭐ إصلاح فعلي (خطأ منطقي): كان هذا الاستعلام الوحيد بالمشروع الذي يغذّي
+    // syncCatalogToStorefront بدون شرط `is_available = 1` (كل نقاط المزامنة
+    // الأخرى بـ productController.js تضيفه). النتيجة: إلغاء أي طلب كان يعيد
+    // نشر كل منتجات التاجر بالكتالوج العام - **حتى المنتجات المخفية عمداً**
+    // (is_available = 0) - لأن catalogSyncService.js ينسخ قيمة is_available
+    // كما هي بدل تصفيتها. أضفنا نفس الشرط المستخدم بكل مكان آخر، مع نفس
+    // تقليص الأعمدة (راجع تعليق saveProduct لتفاصيل سبب ذلك).
+    const allProducts = await env.DB.prepare(
+      `SELECT id, name, description, price, discount, image, category_id, options, features,
+              quantity, quantity_type, is_available, currency
+       FROM products WHERE merchant_id = ? AND is_available = 1`
+    )
+      .bind(user.user_id)
+      .all();
     ctx.waitUntil(syncCatalogToStorefront(env, user.username, user.user_id, allProducts.results));
   }
 
@@ -198,12 +233,23 @@ export async function cancelOrder({ env, ctx, user, body }) {
 // sales_log مباشرة بدون أي JOIN مع جدول products، حتى تبقى مبيعات
 // المنتجات المحذوفة ظاهرة بالإحصائيات دائماً (الاسم مخزّن كـ snapshot
 // وقت البيع، راجع confirmDeliveryCode بالأسفل).
-export async function getStats({ env, user }) {
+export async function getStats({ env, user, body }) {
+  // ⭐ إصلاح حرج (يكسر لوحة التاجر مع نمو المبيعات + استهلاك موارد مفرط):
+  // كان هذا الاستعلام بلا أي LIMIT - يقرأ سجل مبيعات التاجر **بالكامل**
+  // (كل عملية بيع منذ بداية المتجر) بكل استدعاء لتبويب الإحصائيات. لتاجر
+  // نشط لفترة، هذا يعني آلاف/عشرات آلاف الصفوف تُقرأ وتُعالَج (JSON) بكل
+  // فتح للتبويب - يستهلك rows_read من حصة D1 اليومية بسرعة، ويتجاوز بسهولة
+  // سقف 10ms وقت معالج بخطة Cloudflare المجانية (فيفشل الطلب بخطأ تجاوز
+  // الموارد كلما كبر سجل التاجر - عطل يزداد سوءاً مع نجاح المتجر بالذات).
+  // الحل: حد أقصى افتراضي سخي (500 أحدث عملية) يغطي أي استخدام واقعي
+  // للوحة إحصائيات، مع دعم body.limit لصفحات لاحقة إذا احتاجها الواجهة.
+  const limit = Math.min(Math.max(parseInt(body?.limit, 10) || 500, 1), 500);
+
   const rows = await env.DB.prepare(
     `SELECT id, product_id, product_name, quantity, price_per_item, total_price, currency, created_at
-     FROM sales_log WHERE user_id = ? AND type = 'sale' ORDER BY created_at DESC`
+     FROM sales_log WHERE user_id = ? AND type = 'sale' ORDER BY created_at DESC LIMIT ?`
   )
-    .bind(user.user_id)
+    .bind(user.user_id, limit)
     .all();
 
   const salesLog = (rows.results || []).map((r) => ({
@@ -234,7 +280,6 @@ export async function confirmDeliveryCode({ env, ctx, user, body }) {
 
   if (!ticket) throw new HttpError('الطلب غير موجود أو تم تسليمه مسبقاً.', 404);
   if (ticket.status !== 'out_for_delivery') throw new HttpError("يجب أن يكون الطلب في حالة 'خرج للتوصيل' أولاً.", 400);
-  if (String(ticket.delivery_code) !== code) throw new HttpError('كود التسليم غير صحيح. يرجى المراجعة مع العميل.', 400);
 
   let ticketData = {};
   try {
@@ -242,6 +287,48 @@ export async function confirmDeliveryCode({ env, ctx, user, body }) {
   } catch (e) {
     ticketData = {};
   }
+
+  // ⭐ إصلاح أمني: كود التسليم 4 أرقام فقط (9000 احتمال) ولم يكن هناك أي حد
+  // لعدد المحاولات - يمكن تخمينه بالكامل بمحاولات كافية. نسمح بعدد محاولات
+  // معقول خلال نافذة زمنية قصيرة (يكفي لأخطاء الكتابة الحقيقية) ونرفض أي
+  // محاولة إضافية مؤقتاً بعدها، فيصير التخمين الكامل غير عملي زمنياً. نخزّن
+  // المحاولات ضمن ticket_data نفسه (بدون الحاجة لعمود/جدول جديد، بنفس نمط
+  // بقية بيانات التذكرة المتغيّرة).
+  const now = Date.now();
+  const MAX_ATTEMPTS_PER_WINDOW = 5;
+  const WINDOW_MS = 10 * 60 * 1000;
+  const recentAttempts = (ticketData.delivery_attempts || []).filter((ts) => now - ts < WINDOW_MS);
+
+  if (recentAttempts.length >= MAX_ATTEMPTS_PER_WINDOW) {
+    throw new HttpError('عدد محاولات إدخال الكود كبير جداً. يرجى الانتظار قليلاً ثم المحاولة مجدداً.', 429);
+  }
+
+  if (String(ticket.delivery_code) !== code) {
+    recentAttempts.push(now);
+    ticketData.delivery_attempts = recentAttempts;
+    await env.DB.prepare(`UPDATE live_tickets SET ticket_data = ? WHERE ticket_id = ?`)
+      .bind(JSON.stringify(ticketData), ticketId)
+      .run();
+    throw new HttpError('كود التسليم غير صحيح. يرجى المراجعة مع العميل.', 400);
+  }
+
+  // ⭐ إصلاح أمني (حماية من الطلبات المتكررة/المتزامنة): كان حذف التذكرة
+  // يحدث بنهاية الدالة، بعد إدراج سجلات المبيعات بالكامل. لو وصل طلبان
+  // متزامنان بنفس الكود الصحيح (نقرة مزدوجة، إعادة محاولة الشبكة..)، كان
+  // الاثنان يجتازان كل الفحوصات أعلاه (التذكرة لم تُحذف بعد) فتُسجَّل نفس
+  // عملية البيع مرتين بـ sales_log (مضاعفة الإيراد بالإحصائيات) وبـ
+  // orders_archive. نطالب بالتذكرة أولاً بحذف شرطي ذري - فقط أول طلب
+  // ينجح، والثاني يفشل بوضوح بدل تكرار تسجيل البيع بصمت.
+  const claim = await env.DB.prepare(
+    `DELETE FROM live_tickets WHERE ticket_id = ? AND merchant_id = ? AND status = 'out_for_delivery'`
+  )
+    .bind(ticketId, user.user_id)
+    .run();
+
+  if (!claim.meta || claim.meta.changes === 0) {
+    throw new HttpError('تم تأكيد تسليم هذا الطلب بالفعل (ربما بطلب سابق متزامن).', 409);
+  }
+
   const items = ticketData.items || [];
   const currency = ticketData.financials?.currency || 'YER';
   const grandTotal = ticketData.financials?.grand_total || 0;
@@ -283,8 +370,6 @@ export async function confirmDeliveryCode({ env, ctx, user, body }) {
   )
     .bind(ticketId, ticket.order_group_id, ticket.customer_id, user.user_id, grandTotal, JSON.stringify(ticketData), Date.now())
     .run();
-
-  await env.DB.prepare(`DELETE FROM live_tickets WHERE ticket_id = ?`).bind(ticketId).run();
 
   ctx.waitUntil(syncOrderTracking(env, ticketId, 'completed', user.username));
   // ⭐ عند اتمام الطلب فعلياً، يصل إشعار صحيح للعميل (تم التسليم) وللتاجر

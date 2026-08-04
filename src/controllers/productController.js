@@ -29,7 +29,12 @@ export async function saveProduct({ env, ctx, user, body, uploadedImageFile }) {
 
   let finalCategoryId = null;
   if (body.category_id === 'NEW_CHAIN') {
-    const chainNames = JSON.parse(body.category_chain_names || '[]');
+    let chainNames;
+    try {
+      chainNames = JSON.parse(body.category_chain_names || '[]');
+    } catch (e) {
+      throw new HttpError('صيغة سلسلة الفئات (category_chain_names) غير صالحة.', 400);
+    }
     finalCategoryId = await resolveCategoryChain(env, user.user_id, chainNames, body.category_anchor_id || 0);
   } else if (body.category_id) {
     finalCategoryId = parseInt(body.category_id) || null;
@@ -51,6 +56,15 @@ export async function saveProduct({ env, ctx, user, body, uploadedImageFile }) {
   // merchant_id الذي نحاول الإدراج به (أي التاجر الحالي نفسه) - فتصير
   // محاولة "استيلاء" على منتج تاجر آخر بلا أي تأثير على الإطلاق (0 صفوف
   // متأثرة) بدل تنفيذها بصمت.
+  // ⭐ إصلاح: parseFloat(x) || 0 يسمح بمرور قيم سالبة (مثلاً "-100") لأن أي
+  // رقم غير صفري "truthy" بجافاسكربت - فقط الصفر/NaN كانا يُستبدلان بـ 0.
+  // سعر أو كمية سالبة تكسر حسابات السلة/المخزون لاحقاً (verifyCartLive،
+  // خصم المخزون). نقيّد كل قيمة رقمية بحدها الأدنى المنطقي صراحة.
+  const safePrice = Math.max(0, parseFloat(body.price) || 0);
+  const safeCostPrice = Math.max(0, parseFloat(body.cost_price) || 0);
+  const safeDiscount = Math.min(100, Math.max(0, parseFloat(body.discount) || 0));
+  const safeQuantity = Math.max(0, parseInt(body.quantity, 10) || 0);
+
   const result = await env.DB.prepare(
     `INSERT INTO products (id, merchant_id, name, description, price, cost_price, discount, image, quantity, quantity_type, currency, category_id, options, is_available, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -66,11 +80,11 @@ export async function saveProduct({ env, ctx, user, body, uploadedImageFile }) {
       user.user_id,
       body.name,
       body.mainDescription || body.description || '',
-      parseFloat(body.price) || 0,
-      parseFloat(body.cost_price) || 0,
-      parseFloat(body.discount) || 0,
+      safePrice,
+      safeCostPrice,
+      safeDiscount,
       imageUrl,
-      parseInt(body.quantity) || 0,
+      safeQuantity,
       body.quantity_type || 'tracked',
       body.currency || 'YER',
       finalCategoryId,
@@ -84,8 +98,16 @@ export async function saveProduct({ env, ctx, user, body, uploadedImageFile }) {
     throw new HttpError('لا يمكنك تعديل منتج لا يخصك.', 403);
   }
 
+  // ⭐ تحسين أداء/موارد: كانت SELECT * تجلب كل الأعمدة (بما فيها cost_price
+  // الحساس وmerchant_id/updated_at غير المستخدمين هنا) لكل منتج، رغم أن
+  // syncCatalogToStorefront (راجع catalogSyncService.js) يقرأ فقط 13 عمود
+  // محدد. لا يقلل هذا "rows_read" المحسوبة بفوترة D1 (نفس عدد الصفوف)، لكنه
+  // يقلل حجم البيانات المنقولة من D1 وحجم JSON الذي يعالجه الـ Worker لكل
+  // صف - أهم شيء بخطة مجانية سقفها 10ms وقت معالج لكامل الطلب.
   const allProducts = await env.DB.prepare(
-    `SELECT * FROM products WHERE merchant_id = ? AND is_available = 1`
+    `SELECT id, name, description, price, discount, image, category_id, options, features,
+            quantity, quantity_type, is_available, currency
+     FROM products WHERE merchant_id = ? AND is_available = 1`
   )
     .bind(user.user_id)
     .all();
@@ -169,7 +191,9 @@ export async function deleteProduct({ env, ctx, user, body }) {
   }
 
   const remainingProducts = await env.DB.prepare(
-    `SELECT * FROM products WHERE merchant_id = ? AND is_available = 1`
+    `SELECT id, name, description, price, discount, image, category_id, options, features,
+            quantity, quantity_type, is_available, currency
+     FROM products WHERE merchant_id = ? AND is_available = 1`
   )
     .bind(user.user_id)
     .all();
@@ -189,7 +213,9 @@ export async function toggleAvailability({ env, ctx, user, body }) {
     .run();
 
   const visibleProducts = await env.DB.prepare(
-    `SELECT * FROM products WHERE merchant_id = ? AND is_available = 1`
+    `SELECT id, name, description, price, discount, image, category_id, options, features,
+            quantity, quantity_type, is_available, currency
+     FROM products WHERE merchant_id = ? AND is_available = 1`
   )
     .bind(user.user_id)
     .all();

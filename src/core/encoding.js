@@ -2,11 +2,24 @@
 // 🔧 أدوات ترميز عامة (Base64 / PEM) - مشتركة بين كل الخدمات
 // ========================================================
 
+// ⭐ إصلاح أداء حرج (استهلاك وقت المعالج/CPU time): كانت هذه الدالة تبني
+// سلسلة نصية بعملية += متكررة لكل بايت على حدة (binary += ...). السلاسل
+// النصية بجافاسكربت غير قابلة للتعديل (immutable)، فكل += قد ينسخ كامل
+// المحتوى السابق فعلياً بمحركات JS كثيرة - أداء تربيعي O(n²) تقريباً مع
+// حجم البيانات. لصورة منتج حقيقية (مئات الكيلوبايتات لعدة ميغابايتات) هذا
+// يستهلك مللي ثوانٍ كثيرة من وقت المعالج بسهولة - وخطة Cloudflare Workers
+// المجانية تمنح 10ms فقط لكامل الطلب! صورة واحدة كبيرة كانت كافية لتفشل
+// الطلب بالكامل بخطأ "تجاوز حدود الموارد". الحل: معالجة البيانات على
+// دفعات (chunks) بدل بايت بايت - عدد عمليات ضم السلاسل ينخفض من ملايين
+// إلى مئات فقط لنفس حجم الصورة.
 export function arrayBufferToBase64(buffer) {
-  let binary = '';
   const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
+  const CHUNK_SIZE = 8192;
+  const chunks = [];
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK_SIZE)));
+  }
+  return btoa(chunks.join(''));
 }
 
 export function base64UrlEncode(str) {
