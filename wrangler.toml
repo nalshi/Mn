@@ -1,6 +1,6 @@
 name = "api"
 main = "src/index.js"
-compatibility_date = "2026-08-5"
+compatibility_date = "2026-07-29"
 
 # ========================================================
 # 🗄️ قاعدة البيانات D1
