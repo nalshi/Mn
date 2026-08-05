@@ -35,9 +35,24 @@ export async function saveProduct({ env, ctx, user, body, uploadedImageFile }) {
     } catch (e) {
       throw new HttpError('صيغة سلسلة الفئات (category_chain_names) غير صالحة.', 400);
     }
-    finalCategoryId = await resolveCategoryChain(env, user.user_id, chainNames, body.category_anchor_id || 0);
+    finalCategoryId = (await resolveCategoryChain(env, user.user_id, chainNames, body.category_anchor_id || 0)) || null;
   } else if (body.category_id) {
-    finalCategoryId = parseInt(body.category_id) || null;
+    const requestedCategoryId = parseInt(body.category_id) || null;
+    if (requestedCategoryId) {
+      // ⭐ إصلاح: كان يُقبل أي category_id رقمي بدون تحقق من وجوده فعلاً أو
+      // ملكيته لهذا التاجر (قد يكون محذوفاً، أو من كاش قديم بالواجهة). هذا
+      // يسبب فشل قيد FOREIGN KEY صامتاً عند الـ INSERT. نتحقق هنا بنفس
+      // منطق resolveCategoryChain (يخص التاجر أو فئة عامة) قبل استخدامه.
+      const ownedCategory = await env.DB.prepare(
+        `SELECT id FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)`
+      )
+        .bind(requestedCategoryId, user.user_id)
+        .first();
+      if (!ownedCategory) {
+        throw new HttpError('الفئة المختارة لم تعد موجودة، يرجى اختيار فئة أخرى.', 400);
+      }
+    }
+    finalCategoryId = requestedCategoryId;
   }
 
   let imageUrl = body.existing_image || null;
