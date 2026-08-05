@@ -73,9 +73,7 @@ export default {
       if (error instanceof HttpError) {
         return errorResponse(error.message, corsHeaders, error.status);
       }
-      // ⚠️ مؤقت للتشخيص: نطبع error.message/name/cause صراحة لأن الطباعة
-      // العامة لكائن الخطأ لا تُظهر نصه الفعلي بلوحة Cloudflare Logs.
-      console.error('Unhandled Worker error:', error?.name, '|', error?.message, '|', error?.cause);
+      console.error('Unhandled Worker error:', error);
       return errorResponse('حدث خطأ في السيرفر، يرجى المحاولة لاحقاً.', corsHeaders, 500);
     }
   },
